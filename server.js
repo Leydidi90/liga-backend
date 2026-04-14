@@ -1,9 +1,15 @@
+require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const app = express();
 const tenantRoutes = require('./routes/tenantRoutes');
 const organizerRoutes = require('./routes/organizerRoutes');
 const jwt = require('jsonwebtoken');
+
+// Endpoint de salud para Render (Heartbeat)
+app.get('/', (req, res) => {
+    res.json({ status: 'active', message: 'LigaMaster API is running' });
+});
 
 // Configuración de CORS más flexible para producción
 app.use(cors({
