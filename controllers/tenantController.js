@@ -195,7 +195,7 @@ exports.verifyTenantMiddleware = async (req, res, next) => {
                 .update({ estatus_pago: false })
                 .eq('id', tenantData.id);
 
-            return res.status(403).json({ error: "Servicio Suspendido por falta de pago", data: {...tenantData, estatus_pago: false} });
+            return res.status(403).json({ error: "Suscripción Expirada. Por favor realiza tu pago.", data: {...tenantData, estatus_pago: false} });
         }
         
         res.json({ message: "Tenant Activo", data: tenantData });
@@ -239,7 +239,7 @@ exports.loginTenant = async (req, res) => {
     try {
         const { data: tenant, error } = await supabase
             .from('tenant')
-            .select('id, subdominio_o_slug, password, nombre_liga')
+            .select('id, subdominio_o_slug, password, nombre_liga, estatus_pago, fecha_vencimiento')
             .eq('subdominio_o_slug', slug)
             .single();
 
@@ -248,8 +248,13 @@ exports.loginTenant = async (req, res) => {
         // Verificación de suspensión por pago o vencimiento
         const currentDate = new Date();
         const expirationDate = new Date(tenant.fecha_vencimiento);
-        if (!tenant.estatus_pago || currentDate > expirationDate) {
-            return res.status(403).json({ error: "Servicio Suspendido", data: tenant });
+        
+        if (!tenant.estatus_pago) {
+            return res.status(403).json({ error: "Servicio Suspendido Administrativamente", data: tenant });
+        }
+
+        if (currentDate > expirationDate) {
+            return res.status(403).json({ error: "Suscripción Expirada por falta de pago", data: tenant });
         }
 
         const valid = await bcrypt.compare(password, tenant.password);
