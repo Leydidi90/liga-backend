@@ -28,6 +28,17 @@ const sendEmail = async ({ to, subject, html }) => {
     return transporter.sendMail(mailOptions);
 };
 
+const getTenantBySlug = async (slug) => {
+    const { data: tenantData, error } = await supabase
+        .from('tenant')
+        .select('id, nombre_liga, estatus_pago, fecha_vencimiento, plan, dueno_nombre, dueno_email')
+        .eq('subdominio_o_slug', slug)
+        .single();
+
+    if (error || !tenantData) return null;
+    return tenantData;
+};
+
 // Alta de liga
 exports.createTenant = async (req, res) => {
     const { nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, password } = req.body;
@@ -170,18 +181,55 @@ exports.simulatePayment = async (req, res) => {
     }
 };
 
+// Webhook de prueba: simula confirmación automática de pasarela
+exports.simulatePaymentWebhook = async (req, res) => {
+    const { id } = req.params;
+    const { payment_status } = req.body;
+
+    if (payment_status !== 'paid') {
+        return res.status(400).json({ error: "Estado de pago no soportado. Usa payment_status='paid'" });
+    }
+
+    try {
+        const { data: tenantData, error: fetchError } = await supabase
+            .from('tenant')
+            .select('fecha_vencimiento')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !tenantData) return res.status(404).json({ error: "Tenant no encontrado" });
+
+        const currentDate = new Date();
+        let vencimiento = new Date(tenantData.fecha_vencimiento);
+        if (currentDate > vencimiento) vencimiento = new Date();
+        vencimiento.setDate(vencimiento.getDate() + 30);
+        const nuevaFechaStr = vencimiento.toISOString();
+
+        const { error: updateError } = await supabase
+            .from('tenant')
+            .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
+            .eq('id', id);
+
+        if (updateError) throw updateError;
+
+        return res.json({
+            message: "Webhook de prueba procesado correctamente",
+            id,
+            estatus_pago: true,
+            fecha_vencimiento: nuevaFechaStr
+        });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
 // Middleware para verificar dominio
 exports.verifyTenantMiddleware = async (req, res, next) => {
     const slug = req.params.slug;
     
     try {
-        const { data: tenantData, error } = await supabase
-            .from('tenant')
-            .select('id, nombre_liga, estatus_pago, fecha_vencimiento, plan, dueno_nombre, dueno_email')
-            .eq('subdominio_o_slug', slug)
-            .single();
-
-        if (error || !tenantData) return res.status(404).json({ error: "Liga no encontrada" });
+        const tenantData = await getTenantBySlug(slug);
+        if (!tenantData) return res.status(404).json({ error: "Liga no encontrada" });
         
         if (!tenantData.estatus_pago) {
             return res.status(403).json({ error: "Servicio Suspendido", data: tenantData });
@@ -199,6 +247,39 @@ exports.verifyTenantMiddleware = async (req, res, next) => {
         }
         
         res.json({ message: "Tenant Activo", data: tenantData });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+// Middleware real para proteger cualquier endpoint por slug
+exports.ensureTenantActive = async (req, res, next) => {
+    const { slug } = req.params;
+
+    try {
+        const tenantData = await getTenantBySlug(slug);
+        if (!tenantData) return res.status(404).json({ error: "Liga no encontrada" });
+
+        if (!tenantData.estatus_pago) {
+            return res.status(403).json({ error: "Servicio Suspendido", data: tenantData });
+        }
+
+        const currentDate = new Date();
+        const expirationDate = new Date(tenantData.fecha_vencimiento);
+        if (currentDate > expirationDate) {
+            await supabase
+                .from('tenant')
+                .update({ estatus_pago: false })
+                .eq('id', tenantData.id);
+
+            return res.status(403).json({
+                error: "Pendiente de Pago",
+                data: { ...tenantData, estatus_pago: false }
+            });
+        }
+
+        req.tenantStatus = tenantData;
+        next();
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

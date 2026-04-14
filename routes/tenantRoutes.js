@@ -8,6 +8,7 @@ router.post('/tenants', tenantController.createTenant);
 router.put('/tenants/:id/status', tenantController.updateTenantStatus);
 router.put('/tenants/:id', tenantController.updateTenant);
 router.post('/tenants/:id/payment', tenantController.simulatePayment);
+router.post('/tenants/:id/payment-webhook-test', tenantController.simulatePaymentWebhook);
 router.post('/tenants/:id/send-reminder', tenantController.sendReminder);
 router.delete('/tenants/:id', tenantController.deleteTenant);
 

@@ -5,13 +5,16 @@ const tenantController = require('../controllers/tenantController');
 
 // Rutas de administración de Liga (Organizador)
 
+// Login de Organizador (PÚBLICO)
+router.post('/:slug/login', tenantController.loginTenant);
+
+// Validación de estatus/pago para TODO acceso por liga
+router.use('/:slug', tenantController.ensureTenantActive);
+
 // === RUTAS PÚBLICAS (Lectura para aficionados) ===
 router.get('/:slug/equipos', organizerController.getEquipos);
 router.get('/:slug/calendario', organizerController.getCalendario);
 router.get('/:slug/torneos', organizerController.getTorneos);
-
-// Login de Organizador (PÚBLICO)
-router.post('/:slug/login', tenantController.loginTenant);
 
 // === MIDDLEWARE DE PROTECCIÓN (Privado de aquí en adelante) ===
 router.use('/:slug', tenantController.authTenantMiddleware);
