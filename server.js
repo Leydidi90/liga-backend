@@ -3,10 +3,15 @@ const cors = require('cors');
 const app = express();
 const tenantRoutes = require('./routes/tenantRoutes');
 const organizerRoutes = require('./routes/organizerRoutes');
-const db = require('./db/database'); // Initialize DB on start
 const jwt = require('jsonwebtoken');
 
-app.use(cors());
+// Configuración de CORS más flexible para producción
+app.use(cors({
+    origin: '*', // En producción real, se recomienda cambiar esto por el dominio de tu frontend en Vercel
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
 app.use(express.json());
 
 app.use('/api', tenantRoutes);

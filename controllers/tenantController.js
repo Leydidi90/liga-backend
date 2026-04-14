@@ -1,4 +1,4 @@
-const db = require('../db/database.js');
+const supabase = require('../supabaseClient');
 const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
@@ -16,17 +16,33 @@ exports.createTenant = async (req, res) => {
     const fecha_obj = new Date();
     fecha_obj.setDate(fecha_obj.getDate() + 30);
     const fecha_vencimiento = fecha_obj.toISOString();
-    const estatus_pago = true; // Activo (booleano Postgres)
+    const estatus_pago = true;
 
     try {
         // Hashear contraseña antes de guardar
         const hashedPassword = await bcrypt.hash(password || 'ligamaster2026', 10);
 
-        const query = `INSERT INTO Tenant (id, nombre_liga, subdominio_o_slug, fecha_registro, estatus_pago, plan, fecha_vencimiento, dueno_nombre, dueno_email, password)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`;
+        const { data, error } = await supabase
+            .from('tenant')
+            .insert([
+                { 
+                    id, 
+                    nombre_liga, 
+                    subdominio_o_slug, 
+                    fecha_registro, 
+                    estatus_pago, 
+                    plan, 
+                    fecha_vencimiento, 
+                    dueno_nombre, 
+                    dueno_email, 
+                    password: hashedPassword 
+                }
+            ])
+            .select();
+
+        if (error) throw error;
                        
-        await db.query(query, [id, nombre_liga, subdominio_o_slug, fecha_registro, estatus_pago, plan, fecha_vencimiento, dueno_nombre, dueno_email, hashedPassword]);
-        res.status(201).json({ id, nombre_liga, subdominio_o_slug, estatus_pago: true, plan, fecha_vencimiento, dueno_nombre, dueno_email });
+        res.status(201).json(data[0]);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -34,10 +50,14 @@ exports.createTenant = async (req, res) => {
 
 // Obtener todas las ligas
 exports.getTenants = async (req, res) => {
-    const query = `SELECT * FROM Tenant ORDER BY fecha_registro DESC`;
     try {
-        const { rows } = await db.query(query);
-        res.json(rows);
+        const { data, error } = await supabase
+            .from('tenant')
+            .select('*')
+            .order('fecha_registro', { ascending: false });
+            
+        if (error) throw error;
+        res.json(data);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -48,10 +68,16 @@ exports.updateTenantStatus = async (req, res) => {
     const { id } = req.params;
     const { estatus_pago } = req.body; // boolean
 
-    const query = `UPDATE Tenant SET estatus_pago = $1 WHERE id = $2`;
     try {
-        const result = await db.query(query, [estatus_pago, id]);
-        if (result.rowCount === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        const { data, error } = await supabase
+            .from('tenant')
+            .update({ estatus_pago })
+            .eq('id', id)
+            .select();
+
+        if (error) throw error;
+        if (data.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        
         res.json({ message: "Estatus actualizado", id, estatus_pago });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -63,12 +89,16 @@ exports.simulatePayment = async (req, res) => {
     const { id } = req.params;
     
     try {
-        const { rows } = await db.query(`SELECT fecha_vencimiento FROM Tenant WHERE id = $1`, [id]);
-        if (rows.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        const { data: tenantData, error: fetchError } = await supabase
+            .from('tenant')
+            .select('fecha_vencimiento')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !tenantData) return res.status(404).json({ error: "Tenant no encontrado" });
         
-        const row = rows[0];
         const currentDate = new Date();
-        let vencimiento = new Date(row.fecha_vencimiento);
+        let vencimiento = new Date(tenantData.fecha_vencimiento);
         
         if (currentDate > vencimiento) {
              vencimiento = new Date();
@@ -76,7 +106,13 @@ exports.simulatePayment = async (req, res) => {
         vencimiento.setDate(vencimiento.getDate() + 30);
         const nuevaFechaStr = vencimiento.toISOString();
 
-        await db.query(`UPDATE Tenant SET fecha_vencimiento = $1, estatus_pago = true WHERE id = $2`, [nuevaFechaStr, id]);
+        const { error: updateError } = await supabase
+            .from('tenant')
+            .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
+            .eq('id', id);
+
+        if (updateError) throw updateError;
+        
         res.json({ message: "Pago registrado exitosamente", id, nueva_fecha_vencimiento: nuevaFechaStr, estatus_pago: true });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -88,22 +124,30 @@ exports.verifyTenantMiddleware = async (req, res, next) => {
     const slug = req.params.slug;
     
     try {
-        const { rows } = await db.query(`SELECT id, nombre_liga, estatus_pago, fecha_vencimiento, plan, dueno_nombre, dueno_email FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (rows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
+        const { data: tenantData, error } = await supabase
+            .from('tenant')
+            .select('id, nombre_liga, estatus_pago, fecha_vencimiento, plan, dueno_nombre, dueno_email')
+            .eq('subdominio_o_slug', slug)
+            .single();
+
+        if (error || !tenantData) return res.status(404).json({ error: "Liga no encontrada" });
         
-        const row = rows[0];
-        if (!row.estatus_pago) {
-            return res.status(403).json({ error: "Servicio Suspendido", data: row });
+        if (!tenantData.estatus_pago) {
+            return res.status(403).json({ error: "Servicio Suspendido", data: tenantData });
         }
         
         const currentDate = new Date();
-        const expirationDate = new Date(row.fecha_vencimiento);
+        const expirationDate = new Date(tenantData.fecha_vencimiento);
         if (currentDate > expirationDate) {
-            await db.query(`UPDATE Tenant SET estatus_pago = false WHERE id = $1`, [row.id]);
-            return res.status(403).json({ error: "Servicio Suspendido por falta de pago", data: {...row, estatus_pago: false} });
+            await supabase
+                .from('tenant')
+                .update({ estatus_pago: false })
+                .eq('id', tenantData.id);
+
+            return res.status(403).json({ error: "Servicio Suspendido por falta de pago", data: {...tenantData, estatus_pago: false} });
         }
         
-        res.json({ message: "Tenant Activo", data: row });
+        res.json({ message: "Tenant Activo", data: tenantData });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -115,20 +159,22 @@ exports.updateTenant = async (req, res) => {
     const { dueno_nombre, dueno_email, plan, password } = req.body;
 
     try {
-        let query;
-        let params;
+        const updateData = { dueno_nombre, dueno_email, plan };
 
         if (password && password.trim() !== "") {
             const hashedPassword = await bcrypt.hash(password, 10);
-            query = `UPDATE Tenant SET dueno_nombre = $1, dueno_email = $2, plan = $3, password = $4 WHERE id = $5`;
-            params = [dueno_nombre, dueno_email, plan, hashedPassword, id];
-        } else {
-            query = `UPDATE Tenant SET dueno_nombre = $1, dueno_email = $2, plan = $3 WHERE id = $4`;
-            params = [dueno_nombre, dueno_email, plan, id];
+            updateData.password = hashedPassword;
         }
 
-        const result = await db.query(query, params);
-        if (result.rowCount === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        const { data, error } = await supabase
+            .from('tenant')
+            .update(updateData)
+            .eq('id', id)
+            .select();
+
+        if (error) throw error;
+        if (data.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        
         res.json({ message: "Tenant actualizado", id });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -140,10 +186,14 @@ exports.loginTenant = async (req, res) => {
     const { slug, password } = req.body;
 
     try {
-        const { rows } = await db.query(`SELECT id, subdominio_o_slug, password, nombre_liga FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (rows.length === 0) return res.status(401).json({ error: "Liga no registrada" });
+        const { data: tenant, error } = await supabase
+            .from('tenant')
+            .select('id, subdominio_o_slug, password, nombre_liga')
+            .eq('subdominio_o_slug', slug)
+            .single();
 
-        const tenant = rows[0];
+        if (error || !tenant) return res.status(401).json({ error: "Liga no registrada" });
+
         const valid = await bcrypt.compare(password, tenant.password);
         if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
 
@@ -188,10 +238,14 @@ exports.sendReminder = async (req, res) => {
     const { id } = req.params;
 
     try {
-        const { rows } = await db.query(`SELECT nombre_liga, dueno_nombre, dueno_email, plan, estatus_pago, fecha_vencimiento FROM Tenant WHERE id = $1`, [id]);
-        if (rows.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        const { data: tenant, error } = await supabase
+            .from('tenant')
+            .select('nombre_liga, dueno_nombre, dueno_email, plan, estatus_pago, fecha_vencimiento')
+            .eq('id', id)
+            .single();
+
+        if (error || !tenant) return res.status(404).json({ error: "Tenant no encontrado" });
         
-        const tenant = rows[0];
         if (!tenant.dueno_email) {
              return res.status(400).json({ error: "El Tenant no tiene un correo asignado." });
         }
@@ -238,4 +292,3 @@ exports.sendReminder = async (req, res) => {
         return res.status(500).json({ error: "Fallo al enviar correo. Verifica tus credenciales de Gmail." });
     }
 };
-

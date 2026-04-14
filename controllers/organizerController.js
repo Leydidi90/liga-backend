@@ -1,15 +1,30 @@
-const db = require('../db/database.js');
+const supabase = require('../supabaseClient');
 const { v4: uuidv4 } = require('uuid');
+
+const getTenantIdBySlug = async (slug) => {
+    const { data, error } = await supabase
+        .from('tenant')
+        .select('id')
+        .eq('subdominio_o_slug', slug)
+        .single();
+    if (error || !data) return null;
+    return data.id;
+};
 
 exports.getEquipos = async (req, res) => {
     const { slug } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const tenant_id = tRows[0].id;
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        const { rows } = await db.query(`SELECT * FROM Equipo WHERE tenant_id = $1 ORDER BY puntos DESC`, [tenant_id]);
-        res.json(rows);
+        const { data, error } = await supabase
+            .from('equipo')
+            .select('*')
+            .eq('tenant_id', tenant_id)
+            .order('puntos', { ascending: false });
+
+        if (error) throw error;
+        res.json(data);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -19,13 +34,17 @@ exports.addEquipo = async (req, res) => {
     const { slug } = req.params;
     const { nombre, delegado, escudo } = req.body;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const tenant_id = tRows[0].id;
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
         const id = uuidv4();
-        await db.query(`INSERT INTO Equipo (id, tenant_id, nombre, delegado, escudo) VALUES ($1, $2, $3, $4, $5)`, [id, tenant_id, nombre, delegado || '', escudo || '']);
-        res.json({ id, tenant_id, nombre, delegado, escudo, puntos: 0, partidos_jugados: 0 });
+        const { data, error } = await supabase
+            .from('equipo')
+            .insert([{ id, tenant_id, nombre, delegado: delegado || '', escudo: escudo || '' }])
+            .select();
+
+        if (error) throw error;
+        res.json(data[0]);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -35,15 +54,24 @@ exports.addEquipo = async (req, res) => {
 exports.generateRoundRobin = async (req, res) => {
     const { slug } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const tenant_id = tRows[0].id;
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        const { rows: equipos } = await db.query(`SELECT id FROM Equipo WHERE tenant_id = $1`, [tenant_id]);
+        const { data: equipos, error: eError } = await supabase
+            .from('equipo')
+            .select('id')
+            .eq('tenant_id', tenant_id);
+
+        if (eError) throw eError;
         if (equipos.length < 2) return res.status(400).json({ error: "Se necesitan al menos 2 equipos registrados" });
 
         // Limpiar el calendario actual estrictamente de ESTE TENANT
-        await db.query(`DELETE FROM Partido WHERE tenant_id = $1`, [tenant_id]);
+        const { error: dError } = await supabase
+            .from('partido')
+            .delete()
+            .eq('tenant_id', tenant_id);
+            
+        if (dError) throw dError;
 
         let equipoIds = equipos.map(e => e.id);
         
@@ -77,12 +105,11 @@ exports.generateRoundRobin = async (req, res) => {
         }
 
         // Inserción multi-fila en BD
-        for (let p of partidos) {
-            await db.query(
-                `INSERT INTO Partido (id, tenant_id, jornada, equipo_local_id, equipo_visitante_id) VALUES ($1, $2, $3, $4, $5)`,
-                [p.id, p.tenant_id, p.jornada, p.equipo_local_id, p.equipo_visitante_id]
-            );
-        }
+        const { error: iError } = await supabase
+            .from('partido')
+            .insert(partidos);
+
+        if (iError) throw iError;
 
         res.json({ message: "Calendario generado exitosamente", partidos_generados: partidos.length });
     } catch (err) {
@@ -93,21 +120,32 @@ exports.generateRoundRobin = async (req, res) => {
 exports.getCalendario = async (req, res) => {
     const { slug } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const tenant_id = tRows[0].id;
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        const query = `
-            SELECT p.id, p.jornada, p.goles_local, p.goles_visitante, p.estatus, p.stats, p.sede, p.horario,
-                   loc.nombre AS local_nombre, vis.nombre AS visitante_nombre, loc.escudo AS local_escudo, vis.escudo AS visitante_escudo
-            FROM Partido p
-            JOIN Equipo loc ON p.equipo_local_id = loc.id
-            JOIN Equipo vis ON p.equipo_visitante_id = vis.id
-            WHERE p.tenant_id = $1
-            ORDER BY p.jornada ASC
-        `;
-        const { rows } = await db.query(query, [tenant_id]);
-        res.json(rows);
+        // En Supabase, para joins usamos la sintaxis select con relaciones
+        const { data, error } = await supabase
+            .from('partido')
+            .select(`
+                id, jornada, goles_local, goles_visitante, estatus, stats, sede, horario,
+                local:equipo_local_id (nombre, escudo),
+                visitante:equipo_visitante_id (nombre, escudo)
+            `)
+            .eq('tenant_id', tenant_id)
+            .order('jornada', { ascending: true });
+
+        if (error) throw error;
+
+        // Mapear para mantener el formato que espera el frontend
+        const result = data.map(p => ({
+            ...p,
+            local_nombre: p.local.nombre,
+            local_escudo: p.local.escudo,
+            visitante_nombre: p.visitante.nombre,
+            visitante_escudo: p.visitante.escudo
+        }));
+
+        res.json(result);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -118,24 +156,37 @@ exports.updatePartido = async (req, res) => {
     const { goles_local, goles_visitante, stats } = req.body;
     
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const tenant_id = tRows[0].id;
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        const { rows: pRows } = await db.query(`SELECT * FROM Partido WHERE id = $1 AND tenant_id = $2`, [id, tenant_id]);
-        if (pRows.length === 0) return res.status(404).json({ error: "Partido no encontrado" });
-        
-        const partido = pRows[0];
+        const { data: partido, error: pError } = await supabase
+            .from('partido')
+            .select('*')
+            .eq('id', id)
+            .eq('tenant_id', tenant_id)
+            .single();
+
+        if (pError || !partido) return res.status(404).json({ error: "Partido no encontrado" });
         
         if (partido.estatus === 'Finalizado') {
-            await db.query(`UPDATE Partido SET stats = $1 WHERE id = $2`, [stats ? JSON.stringify(stats) : null, id]);
+            await supabase
+                .from('partido')
+                .update({ stats })
+                .eq('id', id);
             return res.json({ message: "Acta estadística editada exitosamente." });
         }
         
-        await db.query(
-            `UPDATE Partido SET goles_local = $1, goles_visitante = $2, estatus = 'Finalizado', stats = $3 WHERE id = $4`, 
-            [goles_local, goles_visitante, stats ? JSON.stringify(stats) : null, id]
-        );
+        const { error: uError } = await supabase
+            .from('partido')
+            .update({ 
+                goles_local, 
+                goles_visitante, 
+                estatus: 'Finalizado', 
+                stats 
+            })
+            .eq('id', id);
+
+        if (uError) throw uError;
         
         let ptsLocal = 0, ptsVis = 0, pG_local = 0, pG_vis = 0, pE_local = 0, pE_vis = 0, pP_local = 0, pP_vis = 0;
         
@@ -143,13 +194,25 @@ exports.updatePartido = async (req, res) => {
         else if (goles_visitante > goles_local) { ptsVis = 3; pG_vis = 1; pP_local = 1; }
         else { ptsLocal = 1; ptsVis = 1; pE_local = 1; pE_vis = 1; }
         
-        await db.query(`UPDATE Equipo SET 
-            partidos_jugados = partidos_jugados + 1, partidos_ganados = partidos_ganados + $1, partidos_empatados = partidos_empatados + $2, partidos_perdidos = partidos_perdidos + $3, goles_favor = goles_favor + $4, goles_contra = goles_contra + $5, puntos = puntos + $6
-            WHERE id = $7`, [pG_local, pE_local, pP_local, goles_local, goles_visitante, ptsLocal, partido.equipo_local_id]);
-            
-        await db.query(`UPDATE Equipo SET 
-            partidos_jugados = partidos_jugados + 1, partidos_ganados = partidos_ganados + $1, partidos_empatados = partidos_empatados + $2, partidos_perdidos = partidos_perdidos + $3, goles_favor = goles_favor + $4, goles_contra = goles_contra + $5, puntos = puntos + $6
-            WHERE id = $7`, [pG_vis, pE_vis, pP_vis, goles_visitante, goles_local, ptsVis, partido.equipo_visitante_id]);
+        // Actualización de equipos con lógica de incremento
+        // Nota: RPC o actualizaciones individuales son necesarias para incrementos atómicos en Supabase
+        // Aquí usaremos una combinación
+        
+        const updateEquipo = async (equipoId, g, e, p, gf, gc, pts) => {
+            const { data: eq } = await supabase.from('equipo').select('*').eq('id', equipoId).single();
+            await supabase.from('equipo').update({
+                partidos_jugados: eq.partidos_jugados + 1,
+                partidos_ganados: eq.partidos_ganados + g,
+                partidos_empatados: eq.partidos_empatados + e,
+                partidos_perdidos: eq.partidos_perdidos + p,
+                goles_favor: eq.goles_favor + gf,
+                goles_contra: eq.goles_contra + gc,
+                puntos: eq.puntos + pts
+            }).eq('id', equipoId);
+        };
+
+        await updateEquipo(partido.equipo_local_id, pG_local, pE_local, pP_local, goles_local, goles_visitante, ptsLocal);
+        await updateEquipo(partido.equipo_visitante_id, pG_vis, pE_vis, pP_vis, goles_visitante, goles_local, ptsVis);
 
         res.json({ message: "Marcador y estadísticas cargadas oficialmente." });
     } catch (err) { res.status(500).json({ error: err.message }); }
@@ -159,12 +222,16 @@ exports.updateProgramacion = async (req, res) => {
     const { slug, id } = req.params;
     const { sede, horario } = req.body;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        await db.query(
-            `UPDATE Partido SET sede = $1, horario = $2 WHERE id = $3 AND tenant_id = $4`,
-            [sede || null, horario || null, id, tRows[0].id]
-        );
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
+
+        const { error } = await supabase
+            .from('partido')
+            .update({ sede: sede || null, horario: horario || null })
+            .eq('id', id)
+            .eq('tenant_id', tenant_id);
+
+        if (error) throw error;
         res.json({ message: "Programación actualizada exitosamente." });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
@@ -172,52 +239,60 @@ exports.updateProgramacion = async (req, res) => {
 exports.getArbitros = async (req, res) => {
     const { slug } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const { rows } = await db.query(`
-            SELECT a.*, e.nombre AS equipo_asignado_nombre 
-            FROM Arbitro a
-            LEFT JOIN Equipo e ON a.equipo_id = e.id
-            WHERE a.tenant_id = $1
-            ORDER BY a.nombre ASC
-        `, [tRows[0].id]);
-        res.json(rows);
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
+
+        const { data, error } = await supabase
+            .from('arbitro')
+            .select('*')
+            .eq('tenant_id', tenant_id)
+            .order('nombre', { ascending: true });
+
+        if (error) throw error;
+        res.json(data);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
 exports.addArbitro = async (req, res) => {
     const { slug } = req.params;
-    const { nombre, rol, matricula, categoria, equipo_id } = req.body;
+    const { nombre, rol, matricula, categoria } = req.body;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         const id = uuidv4();
-        
-        let equipo = equipo_id && equipo_id !== '' ? equipo_id : null;
-        let disponibilidad = equipo ? false : true; // If assigned to a team, he's basically taken
 
-        await db.query(
-            `INSERT INTO Arbitro (id, tenant_id, nombre, rol, matricula, categoria, equipo_id, disponibilidad) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, 
-            [id, tRows[0].id, nombre, rol || 'Central', matricula || '', categoria || 'General', equipo, disponibilidad]
-        );
-        res.json({ id, nombre, rol, matricula, categoria, equipo_id: equipo, disponibilidad });
+        const { data, error } = await supabase
+            .from('arbitro')
+            .insert([{ 
+                id, 
+                tenant_id, 
+                nombre, 
+                rol: rol || 'Central', 
+                matricula: matricula || '', 
+                categoria: categoria || 'General', 
+                disponibilidad: true 
+            }])
+            .select();
+
+        if (error) throw error;
+        res.json(data[0]);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
 exports.updateArbitro = async (req, res) => {
     const { slug, id } = req.params;
-    const { nombre, rol, matricula, categoria, equipo_id } = req.body;
+    const { nombre, rol, matricula, categoria } = req.body;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         
-        let equipo = equipo_id && equipo_id !== '' ? equipo_id : null;
-        let disponibilidad = equipo ? false : true;
+        const { error } = await supabase
+            .from('arbitro')
+            .update({ nombre, rol, matricula, categoria })
+            .eq('id', id)
+            .eq('tenant_id', tenant_id);
 
-        await db.query(
-            `UPDATE Arbitro SET nombre = COALESCE($1, nombre), rol = COALESCE($2, rol), matricula = COALESCE($3, matricula), categoria = COALESCE($4, categoria), equipo_id = $5, disponibilidad = $6 WHERE id = $7 AND tenant_id = $8`,
-            [nombre, rol, matricula, categoria, equipo, disponibilidad, id, tRows[0].id]
-        );
+        if (error) throw error;
         res.json({ message: "Árbitro actualizado exitosamente" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
@@ -225,10 +300,16 @@ exports.updateArbitro = async (req, res) => {
 exports.deleteArbitro = async (req, res) => {
     const { slug, id } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         
-        await db.query(`DELETE FROM Arbitro WHERE id = $1 AND tenant_id = $2`, [id, tRows[0].id]);
+        const { error } = await supabase
+            .from('arbitro')
+            .delete()
+            .eq('id', id)
+            .eq('tenant_id', tenant_id);
+
+        if (error) throw error;
         res.json({ message: "Registro eliminado" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
@@ -236,10 +317,16 @@ exports.deleteArbitro = async (req, res) => {
 exports.getTorneos = async (req, res) => {
     const { slug } = req.params;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
-        const { rows } = await db.query(`SELECT * FROM Torneo WHERE tenant_id = $1`, [tRows[0].id]);
-        res.json(rows);
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
+
+        const { data, error } = await supabase
+            .from('torneo')
+            .select('*')
+            .eq('tenant_id', tenant_id);
+
+        if (error) throw error;
+        res.json(data);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -247,13 +334,25 @@ exports.addTorneo = async (req, res) => {
     const { slug } = req.params;
     const { nombre, formato, fecha_inicio, fecha_fin, estatus, premio } = req.body;
     try {
-        const { rows: tRows } = await db.query(`SELECT id FROM Tenant WHERE subdominio_o_slug = $1`, [slug]);
-        if (tRows.length === 0) return res.status(404).json({ error: "Liga no encontrada" });
+        const tenant_id = await getTenantIdBySlug(slug);
+        if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         const id = uuidv4();
-        await db.query(
-            `INSERT INTO Torneo (id, tenant_id, nombre, formato, fecha_inicio, fecha_fin, estatus, premio) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, 
-            [id, tRows[0].id, nombre, formato || 'Liga (Todos contra todos)', fecha_inicio || null, fecha_fin || null, estatus || 'En Registro', premio || '']
-        );
-        res.json({ id, nombre, formato: formato || 'Liga (Todos contra todos)', fecha_inicio, fecha_fin, estatus: estatus || 'En Registro', premio });
+
+        const { data, error } = await supabase
+            .from('torneo')
+            .insert([{ 
+                id, 
+                tenant_id, 
+                nombre, 
+                formato: formato || 'Liga (Todos contra todos)', 
+                fecha_inicio: fecha_inicio || null, 
+                fecha_fin: fecha_fin || null, 
+                estatus: estatus || 'En Registro', 
+                premio: premio || '' 
+            }])
+            .select();
+
+        if (error) throw error;
+        res.json(data[0]);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
