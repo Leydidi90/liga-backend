@@ -4,6 +4,30 @@ const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
+// Helper para enviar correos
+const sendEmail = async ({ to, subject, html }) => {
+    if (!process.env.GMAIL_USER || !process.env.GMAIL_PASS) {
+        throw new Error("Configuración de correo incompleta en el servidor (.env)");
+    }
+
+    const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: process.env.GMAIL_USER,
+            pass: process.env.GMAIL_PASS
+        }
+    });
+
+    const mailOptions = {
+        from: `"LigaMaster SuperAdmin" <${process.env.GMAIL_USER}>`,
+        to,
+        subject,
+        html
+    };
+
+    return transporter.sendMail(mailOptions);
+};
+
 // Alta de liga
 exports.createTenant = async (req, res) => {
     const { nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, password } = req.body;
@@ -91,7 +115,7 @@ exports.simulatePayment = async (req, res) => {
     try {
         const { data: tenantData, error: fetchError } = await supabase
             .from('tenant')
-            .select('fecha_vencimiento')
+            .select('nombre_liga, dueno_nombre, dueno_email, plan, fecha_vencimiento')
             .eq('id', id)
             .single();
 
@@ -113,6 +137,33 @@ exports.simulatePayment = async (req, res) => {
 
         if (updateError) throw updateError;
         
+        // Enviar correo de confirmación automáticamente
+        try {
+            const costo = tenantData.plan === 'Oro' ? 200 : (tenantData.plan === 'Plata' ? 100 : 50);
+            await sendEmail({
+                to: tenantData.dueno_email,
+                subject: `LigaMaster - Confirmación de Pago Recibido (${tenantData.nombre_liga})`,
+                html: `
+                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; border-radius: 10px;">
+                      <h2 style="color: #10b981; text-align: center;">✅ Pago Confirmado</h2>
+                      <p>Hola <strong>${tenantData.dueno_nombre || 'Organizador'}</strong>,</p>
+                      <p>Te confirmamos que hemos recibido satisfactoriamente el pago de tu suscripción para la liga <strong>${tenantData.nombre_liga}</strong>.</p>
+                      <div style="background-color: #f0fdf4; padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid #bbf7d0;">
+                          <p style="margin: 5px 0;"><strong>Monto Pagado:</strong> $${costo}.00 MXN</p>
+                          <p style="margin: 5px 0;"><strong>Nueva Fecha de Vencimiento:</strong> ${new Date(nuevaFechaStr).toLocaleDateString()}</p>
+                          <p style="margin: 5px 0;"><strong>Estatus:</strong> <span style="color: #10b981; font-weight: bold;">Activo</span></p>
+                      </div>
+                      <p>Tu servicio ha sido renovado por 30 días adicionales. ¡Gracias por confiar en LigaMaster!</p>
+                      <br>
+                      <p>Saludos,<br>El equipo de LigaMaster</p>
+                  </div>
+                `
+            });
+        } catch (mailErr) {
+            console.error("Error enviando correo de confirmación de pago:", mailErr);
+            // No bloqueamos la respuesta satisfactoria de la DB, pero lo logueamos
+        }
+
         res.json({ message: "Pago registrado exitosamente", id, nueva_fecha_vencimiento: nuevaFechaStr, estatus_pago: true });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -194,6 +245,13 @@ exports.loginTenant = async (req, res) => {
 
         if (error || !tenant) return res.status(401).json({ error: "Liga no registrada" });
 
+        // Verificación de suspensión por pago o vencimiento
+        const currentDate = new Date();
+        const expirationDate = new Date(tenant.fecha_vencimiento);
+        if (!tenant.estatus_pago || currentDate > expirationDate) {
+            return res.status(403).json({ error: "Servicio Suspendido", data: tenant });
+        }
+
         const valid = await bcrypt.compare(password, tenant.password);
         if (!valid) return res.status(401).json({ error: "Contraseña incorrecta" });
 
@@ -263,8 +321,7 @@ exports.sendReminder = async (req, res) => {
         const costo = tenant.plan === 'Oro' ? 200 : (tenant.plan === 'Plata' ? 100 : 50);
         const vencimiento = new Date(tenant.fecha_vencimiento).toLocaleDateString();
 
-        const mailOptions = {
-            from: `"LigaMaster SuperAdmin" <${process.env.GMAIL_USER}>`,
+        await sendEmail({
             to: tenant.dueno_email,
             subject: `LigaMaster - Factura y Recordatorio de Pago (${tenant.nombre_liga})`,
             html: `
@@ -283,12 +340,30 @@ exports.sendReminder = async (req, res) => {
                   <p>Saludos cordiales,<br>El equipo de LigaMaster</p>
               </div>
             `
-        };
+        });
 
-        await transporter.sendMail(mailOptions);
         res.json({ message: "Correo enviado exitosamente a " + tenant.dueno_email });
     } catch (err) {
         console.error("Error al enviar correo:", err);
         return res.status(500).json({ error: "Fallo al enviar correo. Verifica tus credenciales de Gmail." });
+    }
+};
+
+exports.deleteTenant = async (req, res) => {
+    const { id } = req.params;
+    try {
+        // Eliminar registros vinculados para evitar errores de integridad (si no hay CASCADE)
+        await supabase.from('partido').delete().eq('tenant_id', id);
+        await supabase.from('equipo').delete().eq('tenant_id', id);
+        await supabase.from('arbitro').delete().eq('tenant_id', id);
+        await supabase.from('torneo').delete().eq('tenant_id', id);
+
+        // Finalmente eliminar el tenant
+        const { error } = await supabase.from('tenant').delete().eq('id', id);
+
+        if (error) throw error;
+        res.json({ message: "Liga eliminada permanentemente" });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 };
