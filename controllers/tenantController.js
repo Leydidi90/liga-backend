@@ -39,46 +39,195 @@ const getTenantBySlug = async (slug) => {
     return tenantData;
 };
 
-// Alta de liga
-exports.createTenant = async (req, res) => {
-    const { nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, password } = req.body;
-    
-    // Generar datos default
-    const id = uuidv4();
-    const fecha_registro = new Date().toISOString();
-    
-    // Sumar 30 días default
-    const fecha_obj = new Date();
-    fecha_obj.setDate(fecha_obj.getDate() + 30);
-    const fecha_vencimiento = fecha_obj.toISOString();
-    const estatus_pago = true;
+const ALLOWED_PLANS = ['Bronce', 'Plata', 'Oro'];
+
+/** Renueva suscripción + correo de confirmación (SuperAdmin y primer pago del organizador). */
+async function executeSubscriptionPayment(tenantId) {
+    const { data: tenantData, error: fetchError } = await supabase
+        .from('tenant')
+        .select('nombre_liga, dueno_nombre, dueno_email, plan, fecha_vencimiento')
+        .eq('id', tenantId)
+        .single();
+
+    if (fetchError || !tenantData) {
+        const e = new Error('Tenant no encontrado');
+        e.statusCode = 404;
+        throw e;
+    }
+
+    const currentDate = new Date();
+    let vencimiento = new Date(tenantData.fecha_vencimiento);
+    if (currentDate > vencimiento) {
+        vencimiento = new Date();
+    }
+    vencimiento.setDate(vencimiento.getDate() + 30);
+    const nuevaFechaStr = vencimiento.toISOString();
+
+    const { error: updateError } = await supabase
+        .from('tenant')
+        .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
+        .eq('id', tenantId);
+
+    if (updateError) throw updateError;
 
     try {
-        // Hashear contraseña antes de guardar
-        const hashedPassword = await bcrypt.hash(password || 'ligamaster2026', 10);
+        const costo = tenantData.plan === 'Oro' ? 200 : (tenantData.plan === 'Plata' ? 100 : 50);
+        await sendEmail({
+            to: tenantData.dueno_email,
+            subject: `LigaMaster - Confirmación de Pago Recibido (${tenantData.nombre_liga})`,
+            html: `
+                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; border-radius: 10px;">
+                      <h2 style="color: #10b981; text-align: center;">✅ Pago Confirmado</h2>
+                      <p>Hola <strong>${tenantData.dueno_nombre || 'Organizador'}</strong>,</p>
+                      <p>Te confirmamos que hemos recibido satisfactoriamente el pago de tu suscripción para la liga <strong>${tenantData.nombre_liga}</strong>.</p>
+                      <div style="background-color: #f0fdf4; padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid #bbf7d0;">
+                          <p style="margin: 5px 0;"><strong>Monto Pagado:</strong> $${costo}.00 MXN</p>
+                          <p style="margin: 5px 0;"><strong>Nueva Fecha de Vencimiento:</strong> ${new Date(nuevaFechaStr).toLocaleDateString()}</p>
+                          <p style="margin: 5px 0;"><strong>Estatus:</strong> <span style="color: #10b981; font-weight: bold;">Activo</span></p>
+                      </div>
+                      <p>Tu servicio ha sido renovado por 30 días adicionales. ¡Gracias por confiar en LigaMaster!</p>
+                      <br>
+                      <p>Saludos,<br>El equipo de LigaMaster</p>
+                  </div>
+                `
+        });
+    } catch (mailErr) {
+        console.error('Error enviando correo de confirmación de pago:', mailErr);
+    }
+
+    return { nueva_fecha_vencimiento: nuevaFechaStr, estatus_pago: true };
+}
+
+// Registro público (organizador crea su liga; queda pendiente de pago)
+exports.registerOrganizerPublic = async (req, res) => {
+    const { nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, password } = req.body;
+
+    if (!nombre_liga || !dueno_nombre || !dueno_email || !password) {
+        return res.status(400).json({ error: 'Faltan datos obligatorios' });
+    }
+    if (!ALLOWED_PLANS.includes(plan)) {
+        return res.status(400).json({ error: 'Plan no válido' });
+    }
+
+    const slug = String(subdominio_o_slug || '')
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
+
+    if (slug.length < 3) {
+        return res.status(400).json({ error: 'El código de liga debe tener al menos 3 caracteres (letras, números o guiones)' });
+    }
+
+    try {
+        const taken = await getTenantBySlug(slug);
+        if (taken) {
+            return res.status(409).json({ error: 'Ese código de liga ya está en uso. Elige otro.' });
+        }
+
+        const id = uuidv4();
+        const fecha_registro = new Date().toISOString();
+        const fecha_vencimiento = new Date(0).toISOString();
+        const estatus_pago = false;
+        const hashedPassword = await bcrypt.hash(password, 10);
 
         const { data, error } = await supabase
             .from('tenant')
             .insert([
-                { 
-                    id, 
-                    nombre_liga, 
-                    subdominio_o_slug, 
-                    fecha_registro, 
-                    estatus_pago, 
-                    plan, 
-                    fecha_vencimiento, 
-                    dueno_nombre, 
-                    dueno_email, 
-                    password: hashedPassword 
+                {
+                    id,
+                    nombre_liga,
+                    subdominio_o_slug: slug,
+                    fecha_registro,
+                    estatus_pago,
+                    plan,
+                    fecha_vencimiento,
+                    dueno_nombre,
+                    dueno_email,
+                    password: hashedPassword
                 }
             ])
-            .select();
+            .select('id, nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, estatus_pago, fecha_registro');
 
         if (error) throw error;
-                       
+
         res.status(201).json(data[0]);
     } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+exports.checkSlugAvailable = async (req, res) => {
+    const raw = String(req.params.slug || '')
+        .toLowerCase()
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '');
+    if (raw.length < 3) {
+        return res.json({ available: true, slug: raw, validLength: false });
+    }
+    const t = await getTenantBySlug(raw);
+    res.json({ available: !t, slug: raw, validLength: true });
+};
+
+exports.listPublicLigasForPortal = async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('tenant')
+            .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago')
+            .order('fecha_registro', { ascending: false });
+
+        if (error) throw error;
+
+        const now = new Date();
+        const filtered = (data || []).filter(
+            (d) => d.estatus_pago && new Date(d.fecha_vencimiento) > now
+        );
+        res.json(filtered);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+// Primer pago del organizador tras el registro (valida contraseña)
+exports.organizerFirstPayment = async (req, res) => {
+    const { tenantId } = req.params;
+    const { password, slug } = req.body;
+
+    if (!password || !slug) {
+        return res.status(400).json({ error: 'Contraseña y código de liga son obligatorios' });
+    }
+
+    try {
+        const { data: tenant, error } = await supabase
+            .from('tenant')
+            .select('id, subdominio_o_slug, password')
+            .eq('id', tenantId)
+            .single();
+
+        if (error || !tenant) {
+            return res.status(404).json({ error: 'Liga no encontrada' });
+        }
+        if (tenant.subdominio_o_slug !== String(slug).toLowerCase().trim()) {
+            return res.status(403).json({ error: 'El código de liga no coincide con el registro' });
+        }
+
+        const valid = await bcrypt.compare(password, tenant.password);
+        if (!valid) {
+            return res.status(401).json({ error: 'Contraseña incorrecta' });
+        }
+
+        const result = await executeSubscriptionPayment(tenantId);
+        res.json({
+            message: 'Pago confirmado. Tu liga está activa.',
+            id: tenantId,
+            nueva_fecha_vencimiento: result.nueva_fecha_vencimiento,
+            estatus_pago: true
+        });
+    } catch (err) {
+        if (err.statusCode === 404) {
+            return res.status(404).json({ error: err.message });
+        }
         return res.status(500).json({ error: err.message });
     }
 };
@@ -119,69 +268,26 @@ exports.updateTenantStatus = async (req, res) => {
     }
 };
 
-// Simulación de Pago - Extender vida mes
+// Simulación de Pago (SuperAdmin) - Extender vida mes
 exports.simulatePayment = async (req, res) => {
     const { id } = req.params;
-    
     try {
-        const { data: tenantData, error: fetchError } = await supabase
-            .from('tenant')
-            .select('nombre_liga, dueno_nombre, dueno_email, plan, fecha_vencimiento')
-            .eq('id', id)
-            .single();
-
-        if (fetchError || !tenantData) return res.status(404).json({ error: "Tenant no encontrado" });
-        
-        const currentDate = new Date();
-        let vencimiento = new Date(tenantData.fecha_vencimiento);
-        
-        if (currentDate > vencimiento) {
-             vencimiento = new Date();
-        }
-        vencimiento.setDate(vencimiento.getDate() + 30);
-        const nuevaFechaStr = vencimiento.toISOString();
-
-        const { error: updateError } = await supabase
-            .from('tenant')
-            .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
-            .eq('id', id);
-
-        if (updateError) throw updateError;
-        
-        // Enviar correo de confirmación automáticamente
-        try {
-            const costo = tenantData.plan === 'Oro' ? 200 : (tenantData.plan === 'Plata' ? 100 : 50);
-            await sendEmail({
-                to: tenantData.dueno_email,
-                subject: `LigaMaster - Confirmación de Pago Recibido (${tenantData.nombre_liga})`,
-                html: `
-                  <div style="font-family: Arial, sans-serif; max-width: 600px; margin: auto; border: 1px solid #ddd; padding: 20px; border-radius: 10px;">
-                      <h2 style="color: #10b981; text-align: center;">✅ Pago Confirmado</h2>
-                      <p>Hola <strong>${tenantData.dueno_nombre || 'Organizador'}</strong>,</p>
-                      <p>Te confirmamos que hemos recibido satisfactoriamente el pago de tu suscripción para la liga <strong>${tenantData.nombre_liga}</strong>.</p>
-                      <div style="background-color: #f0fdf4; padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid #bbf7d0;">
-                          <p style="margin: 5px 0;"><strong>Monto Pagado:</strong> $${costo}.00 MXN</p>
-                          <p style="margin: 5px 0;"><strong>Nueva Fecha de Vencimiento:</strong> ${new Date(nuevaFechaStr).toLocaleDateString()}</p>
-                          <p style="margin: 5px 0;"><strong>Estatus:</strong> <span style="color: #10b981; font-weight: bold;">Activo</span></p>
-                      </div>
-                      <p>Tu servicio ha sido renovado por 30 días adicionales. ¡Gracias por confiar en LigaMaster!</p>
-                      <br>
-                      <p>Saludos,<br>El equipo de LigaMaster</p>
-                  </div>
-                `
-            });
-        } catch (mailErr) {
-            console.error("Error enviando correo de confirmación de pago:", mailErr);
-            // No bloqueamos la respuesta satisfactoria de la DB, pero lo logueamos
-        }
-
-        res.json({ message: "Pago registrado exitosamente", id, nueva_fecha_vencimiento: nuevaFechaStr, estatus_pago: true });
+        const result = await executeSubscriptionPayment(id);
+        res.json({
+            message: 'Pago registrado exitosamente',
+            id,
+            nueva_fecha_vencimiento: result.nueva_fecha_vencimiento,
+            estatus_pago: true
+        });
     } catch (err) {
+        if (err.statusCode === 404) {
+            return res.status(404).json({ error: err.message });
+        }
         return res.status(500).json({ error: err.message });
     }
 };
 
-// Webhook de prueba: simula confirmación automática de pasarela
+// Webhook de prueba: simula confirmación automática de pasarela (SuperAdmin)
 exports.simulatePaymentWebhook = async (req, res) => {
     const { id } = req.params;
     const { payment_status } = req.body;
@@ -191,34 +297,17 @@ exports.simulatePaymentWebhook = async (req, res) => {
     }
 
     try {
-        const { data: tenantData, error: fetchError } = await supabase
-            .from('tenant')
-            .select('fecha_vencimiento')
-            .eq('id', id)
-            .single();
-
-        if (fetchError || !tenantData) return res.status(404).json({ error: "Tenant no encontrado" });
-
-        const currentDate = new Date();
-        let vencimiento = new Date(tenantData.fecha_vencimiento);
-        if (currentDate > vencimiento) vencimiento = new Date();
-        vencimiento.setDate(vencimiento.getDate() + 30);
-        const nuevaFechaStr = vencimiento.toISOString();
-
-        const { error: updateError } = await supabase
-            .from('tenant')
-            .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
-            .eq('id', id);
-
-        if (updateError) throw updateError;
-
+        const result = await executeSubscriptionPayment(id);
         return res.json({
-            message: "Webhook de prueba procesado correctamente",
+            message: 'Webhook de prueba procesado correctamente',
             id,
             estatus_pago: true,
-            fecha_vencimiento: nuevaFechaStr
+            fecha_vencimiento: result.nueva_fecha_vencimiento
         });
     } catch (err) {
+        if (err.statusCode === 404) {
+            return res.status(404).json({ error: err.message });
+        }
         return res.status(500).json({ error: err.message });
     }
 };
@@ -291,6 +380,10 @@ exports.updateTenant = async (req, res) => {
     const { dueno_nombre, dueno_email, plan, password } = req.body;
 
     try {
+        if (plan !== undefined && plan !== null && !ALLOWED_PLANS.includes(plan)) {
+            return res.status(400).json({ error: 'Plan no válido' });
+        }
+
         const updateData = { dueno_nombre, dueno_email, plan };
 
         if (password && password.trim() !== "") {
