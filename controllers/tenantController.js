@@ -41,6 +41,12 @@ const getTenantBySlug = async (slug) => {
 
 const ALLOWED_PLANS = ['Bronce', 'Plata', 'Oro'];
 
+const normalizeSlug = (value) => String(value || '')
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9-]/g, '');
+
 /** Renueva suscripción + correo de confirmación (SuperAdmin y primer pago del organizador). */
 async function executeSubscriptionPayment(tenantId) {
     const { data: tenantData, error: fetchError } = await supabase
@@ -109,11 +115,7 @@ exports.registerOrganizerPublic = async (req, res) => {
         return res.status(400).json({ error: 'Plan no válido' });
     }
 
-    const slug = String(subdominio_o_slug || '')
-        .toLowerCase()
-        .trim()
-        .replace(/\s+/g, '-')
-        .replace(/[^a-z0-9-]/g, '');
+    const slug = normalizeSlug(subdominio_o_slug);
 
     if (slug.length < 3) {
         return res.status(400).json({ error: 'El código de liga debe tener al menos 3 caracteres (letras, números o guiones)' });
@@ -152,6 +154,63 @@ exports.registerOrganizerPublic = async (req, res) => {
         if (error) throw error;
 
         res.status(201).json(data[0]);
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+// Alta (SuperAdmin): crear liga y asignar dueño/organizador
+exports.createTenantBySuperAdmin = async (req, res) => {
+    const { nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, password } = req.body;
+
+    if (!nombre_liga || !dueno_nombre || !dueno_email || !password) {
+        return res.status(400).json({ error: 'Faltan datos obligatorios' });
+    }
+    if (!ALLOWED_PLANS.includes(plan)) {
+        return res.status(400).json({ error: 'Plan no válido' });
+    }
+
+    const slug = normalizeSlug(subdominio_o_slug);
+    if (slug.length < 3) {
+        return res.status(400).json({ error: 'El código de liga debe tener al menos 3 caracteres (letras, números o guiones)' });
+    }
+
+    try {
+        const taken = await getTenantBySlug(slug);
+        if (taken) {
+            return res.status(409).json({ error: 'Ese código de liga ya está en uso. Elige otro.' });
+        }
+
+        const id = uuidv4();
+        const fecha_registro = new Date().toISOString();
+        const fecha_vencimiento = new Date(0).toISOString();
+        const estatus_pago = false;
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        const { data, error } = await supabase
+            .from('tenant')
+            .insert([
+                {
+                    id,
+                    nombre_liga,
+                    subdominio_o_slug: slug,
+                    fecha_registro,
+                    estatus_pago,
+                    plan,
+                    fecha_vencimiento,
+                    dueno_nombre,
+                    dueno_email,
+                    password: hashedPassword
+                }
+            ])
+            .select('id, nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, estatus_pago, fecha_registro');
+
+        if (error) throw error;
+
+        return res.status(201).json({
+            message: 'Liga creada y organizador asignado',
+            data: data[0]
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -336,6 +395,53 @@ exports.verifyTenantMiddleware = async (req, res, next) => {
         }
         
         res.json({ message: "Tenant Activo", data: tenantData });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+// Verificar tenant usando host real (subdominio) o slug explícito de fallback
+exports.verifyTenantByHost = async (req, res) => {
+    const explicitSlug = normalizeSlug(req.query.slug || req.headers['x-tenant-slug']);
+    const hostHeader = String(req.headers['x-forwarded-host'] || req.headers.host || '').toLowerCase();
+    const hostname = hostHeader.split(':')[0];
+    const hostParts = hostname.split('.').filter(Boolean);
+    const hostSlug = hostParts.length >= 3 ? hostParts[0] : '';
+    const slug = explicitSlug || normalizeSlug(hostSlug);
+
+    if (!slug) {
+        return res.status(400).json({
+            error: 'No se pudo determinar la liga desde el host. En desarrollo usa ?slug=mi-liga o header x-tenant-slug.'
+        });
+    }
+
+    try {
+        const tenantData = await getTenantBySlug(slug);
+        if (!tenantData) return res.status(404).json({ error: 'Liga no encontrada' });
+
+        if (!tenantData.estatus_pago) {
+            return res.status(403).json({ error: 'Servicio Suspendido', data: tenantData });
+        }
+
+        const currentDate = new Date();
+        const expirationDate = new Date(tenantData.fecha_vencimiento);
+        if (currentDate > expirationDate) {
+            await supabase
+                .from('tenant')
+                .update({ estatus_pago: false })
+                .eq('id', tenantData.id);
+
+            return res.status(403).json({
+                error: 'Pendiente de Pago',
+                data: { ...tenantData, estatus_pago: false }
+            });
+        }
+
+        return res.json({
+            message: 'Tenant Activo',
+            slug_detectado: slug,
+            data: tenantData
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

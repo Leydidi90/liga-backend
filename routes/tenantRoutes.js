@@ -18,5 +18,6 @@ router.post('/tenants/:id/payment', requireSuperAdmin, tenantController.simulate
 router.post('/tenants/:id/payment-webhook-test', requireSuperAdmin, tenantController.simulatePaymentWebhook);
 router.post('/tenants/:id/send-reminder', requireSuperAdmin, tenantController.sendReminder);
 router.delete('/tenants/:id', requireSuperAdmin, tenantController.deleteTenant);
+router.get('/verify-tenant-host', tenantController.verifyTenantByHost);
 
 module.exports = router;
