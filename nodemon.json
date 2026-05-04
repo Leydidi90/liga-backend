@@ -1,0 +1,4 @@
+{
+  "watch": ["server.js", "controllers", "routes", "middleware"],
+  "ignore": ["db/local-tenants.json", "db/local-league-data.json", "db/*.json"]
+}

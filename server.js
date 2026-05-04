@@ -26,13 +26,27 @@ app.get('/', (req, res) => {
     res.json({ status: 'active', message: 'LigaMaster API is running safely' });
 });
 
+const configuredOrigins = String(process.env.FRONTEND_URL || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+
+const allowedOrigins = configuredOrigins.length
+    ? configuredOrigins
+    : ['http://localhost:5173'];
+
 app.use(cors({
-    origin: '*',
+    origin: (origin, callback) => {
+        // Permitir herramientas locales (Postman/curl) sin origin
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(new Error(`CORS bloqueado para origin: ${origin}`));
+    },
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '20mb' }));
 app.use('/api', tenantRoutes);
 app.use('/api/organizer', organizerRoutes);
 

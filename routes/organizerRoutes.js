@@ -7,6 +7,7 @@ const tenantController = require('../controllers/tenantController');
 
 // Login de Organizador (PÚBLICO)
 router.post('/:slug/login', tenantController.loginTenant);
+router.post('/:slug/representative/login', organizerController.loginRepresentative);
 
 // Validación de estatus/pago para TODO acceso por liga
 router.use('/:slug', tenantController.ensureTenantActive);
@@ -15,6 +16,8 @@ router.use('/:slug', tenantController.ensureTenantActive);
 router.get('/:slug/equipos', organizerController.getEquipos);
 router.get('/:slug/calendario', organizerController.getCalendario);
 router.get('/:slug/torneos', organizerController.getTorneos);
+router.get('/:slug/torneos/:torneoId/inscripcion-info', organizerController.getPublicEnrollmentInfo);
+router.post('/:slug/torneos/:torneoId/inscripcion-representante', organizerController.registerRepresentativeInTournament);
 
 // === MIDDLEWARE DE PROTECCIÓN (Privado de aquí en adelante) ===
 router.use('/:slug', tenantController.authTenantMiddleware);
@@ -31,5 +34,7 @@ router.post('/:slug/arbitros', organizerController.addArbitro);
 router.put('/:slug/arbitros/:id', organizerController.updateArbitro);
 router.delete('/:slug/arbitros/:id', organizerController.deleteArbitro);
 router.post('/:slug/torneos', organizerController.addTorneo);
+router.put('/:slug/torneos/:id/inscripcion-config', organizerController.updateTorneoEnrollmentConfig);
+router.get('/:slug/torneos/:torneoId/inscripciones', organizerController.getTournamentEnrollments);
 
 module.exports = router;

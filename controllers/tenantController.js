@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const localTenantStore = require('../db/localTenantStore');
 
 // Helper para enviar correos
 const sendEmail = async ({ to, subject, html }) => {
@@ -28,7 +29,23 @@ const sendEmail = async ({ to, subject, html }) => {
     return transporter.sendMail(mailOptions);
 };
 
+const useLocalDevMode = String(process.env.LOCAL_DEV_MODE || 'false').toLowerCase() === 'true';
+
 const getTenantBySlug = async (slug) => {
+    if (useLocalDevMode) {
+        const tenant = await localTenantStore.getTenantBySlug(slug);
+        if (!tenant) return null;
+        return {
+            id: tenant.id,
+            nombre_liga: tenant.nombre_liga,
+            estatus_pago: tenant.estatus_pago,
+            fecha_vencimiento: tenant.fecha_vencimiento,
+            plan: tenant.plan,
+            dueno_nombre: tenant.dueno_nombre,
+            dueno_email: tenant.dueno_email
+        };
+    }
+
     const { data: tenantData, error } = await supabase
         .from('tenant')
         .select('id, nombre_liga, estatus_pago, fecha_vencimiento, plan, dueno_nombre, dueno_email')
@@ -47,13 +64,35 @@ const normalizeSlug = (value) => String(value || '')
     .replace(/\s+/g, '-')
     .replace(/[^a-z0-9-]/g, '');
 
+const validatePasswordPolicy = (password) => {
+    const raw = String(password || '');
+    const hasMinLength = raw.length >= 8;
+    const hasUpper = /[A-Z]/.test(raw);
+    const hasLower = /[a-z]/.test(raw);
+    const hasNumber = /\d/.test(raw);
+    const hasSpecial = /[^A-Za-z0-9]/.test(raw);
+    return {
+        valid: hasMinLength && hasUpper && hasLower && hasNumber && hasSpecial,
+        details: { hasMinLength, hasUpper, hasLower, hasNumber, hasSpecial }
+    };
+};
+
 /** Renueva suscripción + correo de confirmación (SuperAdmin y primer pago del organizador). */
-async function executeSubscriptionPayment(tenantId) {
-    const { data: tenantData, error: fetchError } = await supabase
-        .from('tenant')
-        .select('nombre_liga, dueno_nombre, dueno_email, plan, fecha_vencimiento')
-        .eq('id', tenantId)
-        .single();
+async function executeSubscriptionPayment(tenantId, billingCycle = 'monthly') {
+    let tenantData = null;
+    let fetchError = null;
+
+    if (useLocalDevMode) {
+        tenantData = await localTenantStore.getTenantById(tenantId);
+    } else {
+        const result = await supabase
+            .from('tenant')
+            .select('nombre_liga, dueno_nombre, dueno_email, plan, fecha_vencimiento')
+            .eq('id', tenantId)
+            .single();
+        tenantData = result.data;
+        fetchError = result.error;
+    }
 
     if (fetchError || !tenantData) {
         const e = new Error('Tenant no encontrado');
@@ -66,18 +105,28 @@ async function executeSubscriptionPayment(tenantId) {
     if (currentDate > vencimiento) {
         vencimiento = new Date();
     }
-    vencimiento.setDate(vencimiento.getDate() + 30);
+    const cycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
+    const daysToAdd = cycle === 'yearly' ? 365 : 30;
+    vencimiento.setDate(vencimiento.getDate() + daysToAdd);
     const nuevaFechaStr = vencimiento.toISOString();
 
-    const { error: updateError } = await supabase
-        .from('tenant')
-        .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
-        .eq('id', tenantId);
+    let updateError = null;
+    if (useLocalDevMode) {
+        const updated = await localTenantStore.updateTenant(tenantId, { fecha_vencimiento: nuevaFechaStr, estatus_pago: true });
+        if (!updated) updateError = new Error('Tenant no encontrado');
+    } else {
+        const updateResult = await supabase
+            .from('tenant')
+            .update({ fecha_vencimiento: nuevaFechaStr, estatus_pago: true })
+            .eq('id', tenantId);
+        updateError = updateResult.error;
+    }
 
     if (updateError) throw updateError;
 
     try {
-        const costo = tenantData.plan === 'Oro' ? 200 : (tenantData.plan === 'Plata' ? 100 : 50);
+        const baseCosto = tenantData.plan === 'Oro' ? 200 : (tenantData.plan === 'Plata' ? 100 : 50);
+        const costo = cycle === 'yearly' ? baseCosto * 12 : baseCosto;
         await sendEmail({
             to: tenantData.dueno_email,
             subject: `LigaMaster - Confirmación de Pago Recibido (${tenantData.nombre_liga})`,
@@ -88,10 +137,11 @@ async function executeSubscriptionPayment(tenantId) {
                       <p>Te confirmamos que hemos recibido satisfactoriamente el pago de tu suscripción para la liga <strong>${tenantData.nombre_liga}</strong>.</p>
                       <div style="background-color: #f0fdf4; padding: 15px; border-radius: 5px; margin: 15px 0; border: 1px solid #bbf7d0;">
                           <p style="margin: 5px 0;"><strong>Monto Pagado:</strong> $${costo}.00 MXN</p>
+                          <p style="margin: 5px 0;"><strong>Ciclo:</strong> ${cycle === 'yearly' ? 'Anual' : 'Mensual'}</p>
                           <p style="margin: 5px 0;"><strong>Nueva Fecha de Vencimiento:</strong> ${new Date(nuevaFechaStr).toLocaleDateString()}</p>
                           <p style="margin: 5px 0;"><strong>Estatus:</strong> <span style="color: #10b981; font-weight: bold;">Activo</span></p>
                       </div>
-                      <p>Tu servicio ha sido renovado por 30 días adicionales. ¡Gracias por confiar en LigaMaster!</p>
+                      <p>Tu servicio ha sido renovado por ${cycle === 'yearly' ? '365' : '30'} días adicionales. ¡Gracias por confiar en LigaMaster!</p>
                       <br>
                       <p>Saludos,<br>El equipo de LigaMaster</p>
                   </div>
@@ -114,6 +164,12 @@ exports.registerOrganizerPublic = async (req, res) => {
     if (!ALLOWED_PLANS.includes(plan)) {
         return res.status(400).json({ error: 'Plan no válido' });
     }
+    const passwordPolicy = validatePasswordPolicy(password);
+    if (!passwordPolicy.valid) {
+        return res.status(400).json({
+            error: 'La contraseña debe incluir al menos 8 caracteres, mayúscula, minúscula, número y carácter especial.'
+        });
+    }
 
     const slug = normalizeSlug(subdominio_o_slug);
 
@@ -133,27 +189,41 @@ exports.registerOrganizerPublic = async (req, res) => {
         const estatus_pago = false;
         const hashedPassword = await bcrypt.hash(password, 10);
 
+        const tenantToCreate = {
+            id,
+            nombre_liga,
+            subdominio_o_slug: slug,
+            fecha_registro,
+            estatus_pago,
+            plan,
+            fecha_vencimiento,
+            dueno_nombre,
+            dueno_email,
+            password: hashedPassword
+        };
+
+        if (useLocalDevMode) {
+            const created = await localTenantStore.insertTenant(tenantToCreate);
+            return res.status(201).json({
+                id: created.id,
+                nombre_liga: created.nombre_liga,
+                subdominio_o_slug: created.subdominio_o_slug,
+                plan: created.plan,
+                dueno_nombre: created.dueno_nombre,
+                dueno_email: created.dueno_email,
+                estatus_pago: created.estatus_pago,
+                fecha_registro: created.fecha_registro
+            });
+        }
+
         const { data, error } = await supabase
             .from('tenant')
-            .insert([
-                {
-                    id,
-                    nombre_liga,
-                    subdominio_o_slug: slug,
-                    fecha_registro,
-                    estatus_pago,
-                    plan,
-                    fecha_vencimiento,
-                    dueno_nombre,
-                    dueno_email,
-                    password: hashedPassword
-                }
-            ])
+            .insert([tenantToCreate])
             .select('id, nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, estatus_pago, fecha_registro');
 
         if (error) throw error;
 
-        res.status(201).json(data[0]);
+        return res.status(201).json(data[0]);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -169,6 +239,12 @@ exports.createTenantBySuperAdmin = async (req, res) => {
     if (!ALLOWED_PLANS.includes(plan)) {
         return res.status(400).json({ error: 'Plan no válido' });
     }
+    const passwordPolicy = validatePasswordPolicy(password);
+    if (!passwordPolicy.valid) {
+        return res.status(400).json({
+            error: 'La contraseña debe incluir al menos 8 caracteres, mayúscula, minúscula, número y carácter especial.'
+        });
+    }
 
     const slug = normalizeSlug(subdominio_o_slug);
     if (slug.length < 3) {
@@ -187,22 +263,30 @@ exports.createTenantBySuperAdmin = async (req, res) => {
         const estatus_pago = false;
         const hashedPassword = await bcrypt.hash(password, 10);
 
+        const tenantToCreate = {
+            id,
+            nombre_liga,
+            subdominio_o_slug: slug,
+            fecha_registro,
+            estatus_pago,
+            plan,
+            fecha_vencimiento,
+            dueno_nombre,
+            dueno_email,
+            password: hashedPassword
+        };
+
+        if (useLocalDevMode) {
+            const created = await localTenantStore.insertTenant(tenantToCreate);
+            return res.status(201).json({
+                message: 'Liga creada y organizador asignado',
+                data: created
+            });
+        }
+
         const { data, error } = await supabase
             .from('tenant')
-            .insert([
-                {
-                    id,
-                    nombre_liga,
-                    subdominio_o_slug: slug,
-                    fecha_registro,
-                    estatus_pago,
-                    plan,
-                    fecha_vencimiento,
-                    dueno_nombre,
-                    dueno_email,
-                    password: hashedPassword
-                }
-            ])
+            .insert([tenantToCreate])
             .select('id, nombre_liga, subdominio_o_slug, plan, dueno_nombre, dueno_email, estatus_pago, fecha_registro');
 
         if (error) throw error;
@@ -231,12 +315,24 @@ exports.checkSlugAvailable = async (req, res) => {
 
 exports.listPublicLigasForPortal = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('tenant')
-            .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago')
-            .order('fecha_registro', { ascending: false });
-
-        if (error) throw error;
+        let data = null;
+        if (useLocalDevMode) {
+            const tenants = await localTenantStore.listTenants();
+            data = tenants.map((t) => ({
+                id: t.id,
+                nombre_liga: t.nombre_liga,
+                subdominio_o_slug: t.subdominio_o_slug,
+                fecha_vencimiento: t.fecha_vencimiento,
+                estatus_pago: t.estatus_pago
+            }));
+        } else {
+            const result = await supabase
+                .from('tenant')
+                .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago')
+                .order('fecha_registro', { ascending: false });
+            if (result.error) throw result.error;
+            data = result.data;
+        }
 
         const now = new Date();
         const filtered = (data || []).filter(
@@ -251,18 +347,26 @@ exports.listPublicLigasForPortal = async (req, res) => {
 // Primer pago del organizador tras el registro (valida contraseña)
 exports.organizerFirstPayment = async (req, res) => {
     const { tenantId } = req.params;
-    const { password, slug } = req.body;
+    const { password, slug, billingCycle } = req.body;
 
     if (!password || !slug) {
         return res.status(400).json({ error: 'Contraseña y código de liga son obligatorios' });
     }
 
     try {
-        const { data: tenant, error } = await supabase
-            .from('tenant')
-            .select('id, subdominio_o_slug, password')
-            .eq('id', tenantId)
-            .single();
+        let tenant = null;
+        let error = null;
+        if (useLocalDevMode) {
+            tenant = await localTenantStore.getTenantById(tenantId);
+        } else {
+            const result = await supabase
+                .from('tenant')
+                .select('id, subdominio_o_slug, password')
+                .eq('id', tenantId)
+                .single();
+            tenant = result.data;
+            error = result.error;
+        }
 
         if (error || !tenant) {
             return res.status(404).json({ error: 'Liga no encontrada' });
@@ -276,10 +380,12 @@ exports.organizerFirstPayment = async (req, res) => {
             return res.status(401).json({ error: 'Contraseña incorrecta' });
         }
 
-        const result = await executeSubscriptionPayment(tenantId);
+        const normalizedCycle = billingCycle === 'yearly' ? 'yearly' : 'monthly';
+        const result = await executeSubscriptionPayment(tenantId, normalizedCycle);
         res.json({
             message: 'Pago confirmado. Tu liga está activa.',
             id: tenantId,
+            billingCycle: normalizedCycle,
             nueva_fecha_vencimiento: result.nueva_fecha_vencimiento,
             estatus_pago: true
         });
@@ -294,12 +400,17 @@ exports.organizerFirstPayment = async (req, res) => {
 // Obtener todas las ligas
 exports.getTenants = async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('tenant')
-            .select('*')
-            .order('fecha_registro', { ascending: false });
-            
-        if (error) throw error;
+        let data = null;
+        if (useLocalDevMode) {
+            data = await localTenantStore.listTenants();
+        } else {
+            const result = await supabase
+                .from('tenant')
+                .select('*')
+                .order('fecha_registro', { ascending: false });
+            if (result.error) throw result.error;
+            data = result.data;
+        }
         res.json(data);
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -312,14 +423,21 @@ exports.updateTenantStatus = async (req, res) => {
     const { estatus_pago } = req.body; // boolean
 
     try {
-        const { data, error } = await supabase
-            .from('tenant')
-            .update({ estatus_pago })
-            .eq('id', id)
-            .select();
-
-        if (error) throw error;
-        if (data.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        let data = null;
+        if (useLocalDevMode) {
+            const updated = await localTenantStore.updateTenant(id, { estatus_pago });
+            if (!updated) return res.status(404).json({ error: "Tenant no encontrado" });
+            data = [updated];
+        } else {
+            const result = await supabase
+                .from('tenant')
+                .update({ estatus_pago })
+                .eq('id', id)
+                .select();
+            if (result.error) throw result.error;
+            data = result.data;
+            if (data.length === 0) return res.status(404).json({ error: "Tenant no encontrado" });
+        }
         
         res.json({ message: "Estatus actualizado", id, estatus_pago });
     } catch (err) {
@@ -386,10 +504,14 @@ exports.verifyTenantMiddleware = async (req, res, next) => {
         const currentDate = new Date();
         const expirationDate = new Date(tenantData.fecha_vencimiento);
         if (currentDate > expirationDate) {
-            await supabase
-                .from('tenant')
-                .update({ estatus_pago: false })
-                .eq('id', tenantData.id);
+            if (useLocalDevMode) {
+                await localTenantStore.updateTenant(tenantData.id, { estatus_pago: false });
+            } else {
+                await supabase
+                    .from('tenant')
+                    .update({ estatus_pago: false })
+                    .eq('id', tenantData.id);
+            }
 
             return res.status(403).json({ error: "Suscripción Expirada. Por favor realiza tu pago.", data: {...tenantData, estatus_pago: false} });
         }
@@ -426,10 +548,14 @@ exports.verifyTenantByHost = async (req, res) => {
         const currentDate = new Date();
         const expirationDate = new Date(tenantData.fecha_vencimiento);
         if (currentDate > expirationDate) {
-            await supabase
-                .from('tenant')
-                .update({ estatus_pago: false })
-                .eq('id', tenantData.id);
+            if (useLocalDevMode) {
+                await localTenantStore.updateTenant(tenantData.id, { estatus_pago: false });
+            } else {
+                await supabase
+                    .from('tenant')
+                    .update({ estatus_pago: false })
+                    .eq('id', tenantData.id);
+            }
 
             return res.status(403).json({
                 error: 'Pendiente de Pago',
@@ -462,10 +588,14 @@ exports.ensureTenantActive = async (req, res, next) => {
         const currentDate = new Date();
         const expirationDate = new Date(tenantData.fecha_vencimiento);
         if (currentDate > expirationDate) {
-            await supabase
-                .from('tenant')
-                .update({ estatus_pago: false })
-                .eq('id', tenantData.id);
+            if (useLocalDevMode) {
+                await localTenantStore.updateTenant(tenantData.id, { estatus_pago: false });
+            } else {
+                await supabase
+                    .from('tenant')
+                    .update({ estatus_pago: false })
+                    .eq('id', tenantData.id);
+            }
 
             return res.status(403).json({
                 error: "Pendiente de Pago",
@@ -517,11 +647,19 @@ exports.loginTenant = async (req, res) => {
     const { slug, password } = req.body;
 
     try {
-        const { data: tenant, error } = await supabase
-            .from('tenant')
-            .select('id, subdominio_o_slug, password, nombre_liga, estatus_pago, fecha_vencimiento')
-            .eq('subdominio_o_slug', slug)
-            .single();
+        let tenant = null;
+        let error = null;
+        if (useLocalDevMode) {
+            tenant = await localTenantStore.getTenantBySlug(slug);
+        } else {
+            const result = await supabase
+                .from('tenant')
+                .select('id, subdominio_o_slug, password, nombre_liga, estatus_pago, fecha_vencimiento')
+                .eq('subdominio_o_slug', slug)
+                .single();
+            tenant = result.data;
+            error = result.error;
+        }
 
         if (error || !tenant) return res.status(401).json({ error: "Liga no registrada" });
 

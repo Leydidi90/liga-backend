@@ -1,0 +1,28 @@
+{
+  "tenants": [
+    {
+      "id": "6e05354a-3776-493b-b19d-043f5f31cf33",
+      "nombre_liga": "Liga Local Demo",
+      "subdominio_o_slug": "liga-local-demo",
+      "fecha_registro": "2026-04-30T05:33:35.460Z",
+      "estatus_pago": true,
+      "plan": "Bronce",
+      "fecha_vencimiento": "2026-05-30T05:33:59.421Z",
+      "dueno_nombre": "andre",
+      "dueno_email": "andre_local_demo@gmail.com",
+      "password": "$2b$10$X/nu91DZekQ4cWK1avpbk.1Ce6.mO4cCX8j/ho3Gcwrg5zdo5B96q"
+    },
+    {
+      "id": "4e178e91-78ef-4711-a279-0852b2def510",
+      "nombre_liga": "pesadosFC",
+      "subdominio_o_slug": "pesadosfc",
+      "fecha_registro": "2026-04-30T05:35:05.869Z",
+      "estatus_pago": true,
+      "plan": "Bronce",
+      "fecha_vencimiento": "2026-09-27T05:35:53.105Z",
+      "dueno_nombre": "andres",
+      "dueno_email": "andres@gmail.com",
+      "password": "$2b$10$542NUslMeh00KSu0.VG8Q.r5fLh/v.2q2cF8OjMWrxLUXr0pBzB/G"
+    }
+  ]
+}
