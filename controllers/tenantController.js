@@ -330,7 +330,11 @@ exports.listPublicLigasForPortal = async (req, res) => {
                 .from('tenant')
                 .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago')
                 .order('fecha_registro', { ascending: false });
-            if (result.error) throw result.error;
+            
+            if (result.error) {
+                console.error('❌ Error de Supabase en listPublicLigasForPortal:', result.error);
+                throw result.error;
+            }
             data = result.data;
         }
 
@@ -340,7 +344,12 @@ exports.listPublicLigasForPortal = async (req, res) => {
         );
         res.json(filtered);
     } catch (err) {
-        return res.status(500).json({ error: err.message });
+        console.error('❌ Error general en listPublicLigasForPortal:', err);
+        return res.status(500).json({ 
+            error: 'Internal Server Error', 
+            details: err.message,
+            hint: 'Verifica la conexión con la base de datos y las variables de entorno.'
+        });
     }
 };
 

@@ -31,19 +31,33 @@ const configuredOrigins = String(process.env.FRONTEND_URL || '')
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-const allowedOrigins = configuredOrigins.length
-    ? configuredOrigins
-    : ['http://localhost:5173'];
+const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    'http://localhost:5174',
+    'https://liga-frontend-delta.vercel.app',
+    ...configuredOrigins
+];
 
 app.use(cors({
     origin: (origin, callback) => {
         // Permitir herramientas locales (Postman/curl) sin origin
         if (!origin) return callback(null, true);
-        if (allowedOrigins.includes(origin)) return callback(null, true);
-        return callback(new Error(`CORS bloqueado para origin: ${origin}`));
+        
+        // Verificar si el origen está en la lista de permitidos
+        const isAllowed = allowedOrigins.includes(origin) || 
+                         origin.endsWith('.vercel.app'); // Permitir cualquier despliegue de Vercel
+
+        if (isAllowed) {
+            return callback(null, true);
+        } else {
+            console.log('❌ Origen bloqueado por CORS:', origin);
+            return callback(new Error(`CORS bloqueado para origin: ${origin}`));
+        }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true
 }));
 
 app.use(express.json({ limit: '20mb' }));
