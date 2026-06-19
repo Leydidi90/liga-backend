@@ -1,16 +1,52 @@
 {
   "tenants": [
     {
-      "id": "6e05354a-3776-493b-b19d-043f5f31cf33",
-      "nombre_liga": "Liga Local Demo",
-      "subdominio_o_slug": "liga-local-demo",
-      "fecha_registro": "2026-04-30T05:33:35.460Z",
+      "id": "e9d96d78-a1f5-46f9-a256-19c0fa88c822",
+      "nombre_liga": "Eliminatoria Santa Ana",
+      "subdominio_o_slug": "eliminatoria-santa-ana",
+      "fecha_registro": "2026-06-20T12:00:03.000Z",
       "estatus_pago": true,
-      "plan": "Bronce",
-      "fecha_vencimiento": "2026-05-30T05:33:59.421Z",
-      "dueno_nombre": "andre",
-      "dueno_email": "andre_local_demo@gmail.com",
-      "password": "$2b$10$X/nu91DZekQ4cWK1avpbk.1Ce6.mO4cCX8j/ho3Gcwrg5zdo5B96q"
+      "plan": "Oro",
+      "fecha_vencimiento": "2027-06-19T00:00:00.000Z",
+      "dueno_nombre": "Organizador Santa Ana",
+      "dueno_email": "organizador@eliminatoria-santa-ana.test",
+      "password": "$2b$10$WyGUeHSiVuLlWJFhYYWiVuRLbNCZU.Ue.lGvp0WMckvvOBQ8bRsfi"
+    },
+    {
+      "id": "5b2ebd2a-cecc-4115-b717-e887a1e73bff",
+      "nombre_liga": "Copa Dominguera",
+      "subdominio_o_slug": "copa-dominguera",
+      "fecha_registro": "2026-06-20T12:00:02.000Z",
+      "estatus_pago": true,
+      "plan": "Oro",
+      "fecha_vencimiento": "2027-06-19T00:00:00.000Z",
+      "dueno_nombre": "Organizador Copa Dominguera",
+      "dueno_email": "organizador@copa-dominguera.test",
+      "password": "$2b$10$vysdbDuMaPKPaaU.SLCgg.o82udOD/KQkuUUin.p53rygeXq8r5/G"
+    },
+    {
+      "id": "d5af3523-68fe-4cb7-aa36-99081b4b4326",
+      "nombre_liga": "Jocotitlan",
+      "subdominio_o_slug": "jocotitlan",
+      "fecha_registro": "2026-06-20T12:00:01.000Z",
+      "estatus_pago": true,
+      "plan": "Oro",
+      "fecha_vencimiento": "2027-06-19T00:00:00.000Z",
+      "dueno_nombre": "Organizador Jocotitlan",
+      "dueno_email": "organizador@jocotitlan.test",
+      "password": "$2b$10$vysdbDuMaPKPaaU.SLCgg.o82udOD/KQkuUUin.p53rygeXq8r5/G"
+    },
+    {
+      "id": "17fd891a-6115-45a2-a099-86766f490c74",
+      "nombre_liga": "Maradonios",
+      "subdominio_o_slug": "maradonios",
+      "fecha_registro": "2026-06-16T05:51:51.321Z",
+      "estatus_pago": true,
+      "plan": "Oro",
+      "fecha_vencimiento": "2027-06-16T05:55:13.890Z",
+      "dueno_nombre": "Andres Lopez",
+      "dueno_email": "andreslopespina187@gmail.com",
+      "password": "$2b$10$.z4mGa0zOXLk6WvaLWfD5Oaf713bHtcVqY8EpPx/.ydKLAEYxgbci"
     },
     {
       "id": "4e178e91-78ef-4711-a279-0852b2def510",
@@ -23,6 +59,18 @@
       "dueno_nombre": "andres",
       "dueno_email": "andres@gmail.com",
       "password": "$2b$10$542NUslMeh00KSu0.VG8Q.r5fLh/v.2q2cF8OjMWrxLUXr0pBzB/G"
+    },
+    {
+      "id": "6e05354a-3776-493b-b19d-043f5f31cf33",
+      "nombre_liga": "Liga Local Demo",
+      "subdominio_o_slug": "liga-local-demo",
+      "fecha_registro": "2026-04-30T05:33:35.460Z",
+      "estatus_pago": true,
+      "plan": "Bronce",
+      "fecha_vencimiento": "2026-05-30T05:33:59.421Z",
+      "dueno_nombre": "andre",
+      "dueno_email": "andre_local_demo@gmail.com",
+      "password": "$2b$10$X/nu91DZekQ4cWK1avpbk.1Ce6.mO4cCX8j/ho3Gcwrg5zdo5B96q"
     }
   ]
 }

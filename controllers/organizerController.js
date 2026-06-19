@@ -1,13 +1,15 @@
 const supabase = require('../supabaseClient');
-const { v4: uuidv4 } = require('uuid');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const localTenantStore = require('../db/localTenantStore');
-const localLeagueDataStore = require('../db/localLeagueDataStore');
-const useLocalDevMode = String(process.env.LOCAL_DEV_MODE || 'false').toLowerCase() === 'true';
-const CURP_REGEX = /^[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d$/;
-const CURP_ALPHABET = '0123456789ABCDEFGHIJKLMNÑOPQRSTUVWXYZ';
-const ALLOWED_TOURNAMENT_CATEGORIES = [
+        const { v4: uuidv4 } = require('uuid');
+        const bcrypt = require('bcryptjs');
+        const jwt = require('jsonwebtoken');
+        const localTenantStore = require('../db/localTenantStore');
+        const leagueDataStore = require('../db/leagueDataStore');
+        const { sortTenants } = require('../db/localTenantStore');
+        const useLocalDevMode = String(process.env.LOCAL_DEV_MODE || 'false').toLowerCase() === 'true';
+        const skipCurpValidation = String(process.env.SKIP_CURP_VALIDATION || 'false').toLowerCase() === 'true';
+        const CURP_REGEX = /^[A-Z]{4}\d{6}[HM][A-Z]{5}[A-Z0-9]\d$/;
+        const CURP_ALPHABET = '0123456789ABCDEFGHIJKLMNÑOPQRSTUVWXYZ';
+        const ALLOWED_TOURNAMENT_CATEGORIES = [
     'Chupones',
     'Infantil Menor',
     'Infantil Mayor',
@@ -28,7 +30,7 @@ const ALLOWED_TOURNAMENT_CATEGORIES = [
     'Master'
 ];
 
-const getTenantIdBySlug = async (slug) => {
+        const getTenantIdBySlug = async (slug) => {
     if (useLocalDevMode) {
         const tenant = await localTenantStore.getTenantBySlug(slug);
         return tenant ? tenant.id : null;
@@ -42,7 +44,53 @@ const getTenantIdBySlug = async (slug) => {
     return data.id;
 };
 
-const validatePasswordPolicy = (password) => {
+        const listAllTenants = async () => {
+    if (useLocalDevMode) return localTenantStore.listTenants();
+    const { data, error } = await supabase.from('tenant').select('*');
+    if (error) throw error;
+    return sortTenants(data || []);
+};
+
+        const getTenantBySlugFull = async (slug) => {
+    if (useLocalDevMode) return localTenantStore.getTenantBySlug(slug);
+    const { data, error } = await supabase
+        .from('tenant')
+        .select('*')
+        .eq('subdominio_o_slug', slug)
+        .single();
+    if (error || !data) return null;
+    return data;
+};
+
+        const applyStandingsAfterMatch = async (partido, goles_local, goles_visitante) => {
+    let ptsLocal = 0; let ptsVis = 0;
+    let pG_local = 0; let pG_vis = 0;
+    let pE_local = 0; let pE_vis = 0;
+    let pP_local = 0; let pP_vis = 0;
+
+    if (goles_local > goles_visitante) { ptsLocal = 3; pG_local = 1; pP_vis = 1; }
+    else if (goles_visitante > goles_local) { ptsVis = 3; pG_vis = 1; pP_local = 1; }
+    else { ptsLocal = 1; ptsVis = 1; pE_local = 1; pE_vis = 1; }
+
+    const updateEquipo = async (equipoId, g, e, p, gf, gc, pts) => {
+        const eq = await leagueDataStore.getById('equipos', equipoId, partido.tenant_id);
+        if (!eq) return;
+        await leagueDataStore.update('equipos', equipoId, partido.tenant_id, {
+            partidos_jugados: (eq.partidos_jugados || 0) + 1,
+            partidos_ganados: (eq.partidos_ganados || 0) + g,
+            partidos_empatados: (eq.partidos_empatados || 0) + e,
+            partidos_perdidos: (eq.partidos_perdidos || 0) + p,
+            goles_favor: (eq.goles_favor || 0) + gf,
+            goles_contra: (eq.goles_contra || 0) + gc,
+            puntos: (eq.puntos || 0) + pts
+        });
+    };
+
+    await updateEquipo(partido.equipo_local_id, pG_local, pE_local, pP_local, goles_local, goles_visitante, ptsLocal);
+    await updateEquipo(partido.equipo_visitante_id, pG_vis, pE_vis, pP_vis, goles_visitante, goles_local, ptsVis);
+};
+
+        const validatePasswordPolicy = (password) => {
     const raw = String(password || '');
     return (
         raw.length >= 8 &&
@@ -53,7 +101,7 @@ const validatePasswordPolicy = (password) => {
     );
 };
 
-const calculateCurpCheckDigit = (curp17) => {
+        const calculateCurpCheckDigit = (curp17) => {
     const upper = String(curp17 || '').toUpperCase();
     let sum = 0;
     for (let i = 0; i < 17; i += 1) {
@@ -66,18 +114,30 @@ const calculateCurpCheckDigit = (curp17) => {
     return String(digit);
 };
 
-const isValidCurp = (curp) => {
+        const isValidCurp = (curp) => {
     const value = String(curp || '').toUpperCase().trim();
+    if (skipCurpValidation) return value.length >= 5;
     if (!CURP_REGEX.test(value)) return false;
     const expected = calculateCurpCheckDigit(value.slice(0, 17));
     return expected !== null && expected === value.slice(17);
 };
 
-const defaultCobrosTorneo = {
-    mantenimiento_cancha: 0,
-    arbitraje: 0,
-    inscripcion_equipo: 0,
-    costo_por_jugador: 0
+        const defaultCobrosTorneo = {
+    costo_total: 0
+};
+
+// Normaliza la estructura de cobros a un único pago general (costo_total).
+// Mantiene compatibilidad con torneos antiguos que tenían el desglose.
+        const normalizeCobros = (cobros) => {
+    const c = cobros || {};
+    if (c.costo_total !== undefined && c.costo_total !== null) {
+        return { costo_total: Number(c.costo_total) || 0 };
+    }
+    const legacyTotal = Number(c.mantenimiento_cancha || 0) +
+        Number(c.arbitraje || 0) +
+        Number(c.inscripcion_equipo || 0) +
+        Number(c.costo_por_jugador || 0);
+    return { costo_total: Number(legacyTotal.toFixed(2)) };
 };
 
 exports.getEquipos = async (req, res) => {
@@ -86,50 +146,39 @@ exports.getEquipos = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            const equiposActuales = localLeagueDataStore.list('equipos', tenant_id);
-            const inscripciones = localLeagueDataStore.list('inscripciones', tenant_id);
-            const normalizedExisting = new Set(
-                equiposActuales.map((e) => String(e.nombre || '').toLowerCase().trim())
-            );
+        const equiposActuales = await leagueDataStore.list('equipos', tenant_id);
+        const inscripciones = await leagueDataStore.list('inscripciones', tenant_id);
+        const normalizedExisting = new Set(
+            equiposActuales.map((e) => String(e.nombre || '').toLowerCase().trim())
+        );
 
-            inscripciones.forEach((ins) => {
-                const nombreEquipo = String(ins.nombre_equipo || '').trim();
-                if (!nombreEquipo) return;
-                const key = nombreEquipo.toLowerCase();
-                if (normalizedExisting.has(key)) return;
+        for (const ins of inscripciones) {
+            const nombreEquipo = String(ins.nombre_equipo || '').trim();
+            if (!nombreEquipo) continue;
+            const key = nombreEquipo.toLowerCase();
+            if (normalizedExisting.has(key)) continue;
 
-                const nuevoEquipo = {
-                    id: uuidv4(),
-                    tenant_id,
-                    nombre: nombreEquipo,
-                    delegado: '',
-                    escudo: '',
-                    puntos: 0,
-                    partidos_jugados: 0,
-                    partidos_ganados: 0,
-                    partidos_empatados: 0,
-                    partidos_perdidos: 0,
-                    goles_favor: 0,
-                    goles_contra: 0
-                };
-                localLeagueDataStore.insert('equipos', nuevoEquipo);
-                equiposActuales.push(nuevoEquipo);
-                normalizedExisting.add(key);
-            });
-
-            const data = equiposActuales.sort((a, b) => (b.puntos || 0) - (a.puntos || 0));
-            return res.json(data);
+            const nuevoEquipo = {
+                id: uuidv4(),
+                tenant_id,
+                nombre: nombreEquipo,
+                delegado: '',
+                escudo: '',
+                puntos: 0,
+                partidos_jugados: 0,
+                partidos_ganados: 0,
+                partidos_empatados: 0,
+                partidos_perdidos: 0,
+                goles_favor: 0,
+                goles_contra: 0
+            };
+            await leagueDataStore.insert('equipos', nuevoEquipo);
+            equiposActuales.push(nuevoEquipo);
+            normalizedExisting.add(key);
         }
 
-        const { data, error } = await supabase
-            .from('equipo')
-            .select('*')
-            .eq('tenant_id', tenant_id)
-            .order('puntos', { ascending: false });
-
-        if (error) throw error;
-        res.json(data);
+        const data = equiposActuales.sort((a, b) => (b.puntos || 0) - (a.puntos || 0));
+        return res.json(data);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -143,22 +192,12 @@ exports.addEquipo = async (req, res) => {
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
         const id = uuidv4();
-        if (useLocalDevMode) {
-            const created = localLeagueDataStore.insert('equipos', {
-                id, tenant_id, nombre, delegado: delegado || '', escudo: escudo || '',
-                puntos: 0, partidos_jugados: 0, partidos_ganados: 0, partidos_empatados: 0, partidos_perdidos: 0,
-                goles_favor: 0, goles_contra: 0
-            });
-            return res.json(created);
-        }
-
-        const { data, error } = await supabase
-            .from('equipo')
-            .insert([{ id, tenant_id, nombre, delegado: delegado || '', escudo: escudo || '' }])
-            .select();
-
-        if (error) throw error;
-        res.json(data[0]);
+        const created = await leagueDataStore.insert('equipos', {
+            id, tenant_id, nombre, delegado: delegado || '', escudo: escudo || '',
+            puntos: 0, partidos_jugados: 0, partidos_ganados: 0, partidos_empatados: 0, partidos_perdidos: 0,
+            goles_favor: 0, goles_contra: 0
+        });
+        return res.json(created);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -172,64 +211,46 @@ exports.generateRoundRobin = async (req, res) => {
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
         let equipos = [];
-        if (useLocalDevMode) {
-            const equiposActuales = localLeagueDataStore.list('equipos', tenant_id);
-            let equiposSincronizados = [...equiposActuales];
+        const equiposActuales = await leagueDataStore.list('equipos', tenant_id);
+        let equiposSincronizados = [...equiposActuales];
 
-            // Si no hay suficientes equipos creados manualmente, tomar equipos desde inscripciones.
-            if (equiposSincronizados.length < 2) {
-                const inscripciones = localLeagueDataStore.list('inscripciones', tenant_id);
-                const normalizedExisting = new Set(
-                    equiposSincronizados.map((e) => String(e.nombre || '').toLowerCase().trim())
-                );
+        if (equiposSincronizados.length < 2) {
+            const inscripciones = await leagueDataStore.list('inscripciones', tenant_id);
+            const normalizedExisting = new Set(
+                equiposSincronizados.map((e) => String(e.nombre || '').toLowerCase().trim())
+            );
 
-                inscripciones.forEach((ins) => {
-                    const nombreEquipo = String(ins.nombre_equipo || '').trim();
-                    if (!nombreEquipo) return;
-                    const key = nombreEquipo.toLowerCase();
-                    if (normalizedExisting.has(key)) return;
+            for (const ins of inscripciones) {
+                const nombreEquipo = String(ins.nombre_equipo || '').trim();
+                if (!nombreEquipo) continue;
+                const key = nombreEquipo.toLowerCase();
+                if (normalizedExisting.has(key)) continue;
 
-                    const representanteNombre = ins.representante?.nombre_representante || '';
-                    const nuevoEquipo = {
-                        id: uuidv4(),
-                        tenant_id,
-                        nombre: nombreEquipo,
-                        delegado: representanteNombre,
-                        escudo: '',
-                        puntos: 0,
-                        partidos_jugados: 0,
-                        partidos_ganados: 0,
-                        partidos_empatados: 0,
-                        partidos_perdidos: 0,
-                        goles_favor: 0,
-                        goles_contra: 0
-                    };
-                    localLeagueDataStore.insert('equipos', nuevoEquipo);
-                    equiposSincronizados.push(nuevoEquipo);
-                    normalizedExisting.add(key);
-                });
+                const representanteNombre = ins.representante?.nombre_representante || '';
+                const nuevoEquipo = {
+                    id: uuidv4(),
+                    tenant_id,
+                    nombre: nombreEquipo,
+                    delegado: representanteNombre,
+                    escudo: '',
+                    puntos: 0,
+                    partidos_jugados: 0,
+                    partidos_ganados: 0,
+                    partidos_empatados: 0,
+                    partidos_perdidos: 0,
+                    goles_favor: 0,
+                    goles_contra: 0
+                };
+                await leagueDataStore.insert('equipos', nuevoEquipo);
+                equiposSincronizados.push(nuevoEquipo);
+                normalizedExisting.add(key);
             }
-
-            equipos = equiposSincronizados.map((e) => ({ id: e.id }));
-        } else {
-            const { data: dataEquipos, error: eError } = await supabase
-                .from('equipo')
-                .select('id')
-                .eq('tenant_id', tenant_id);
-            if (eError) throw eError;
-            equipos = dataEquipos;
         }
+
+        equipos = equiposSincronizados.map((e) => ({ id: e.id }));
         if (equipos.length < 2) return res.status(400).json({ error: "Se necesitan al menos 2 equipos registrados" });
 
-        if (useLocalDevMode) {
-            localLeagueDataStore.replaceAll('partidos', tenant_id, []);
-        } else {
-            const { error: dError } = await supabase
-                .from('partido')
-                .delete()
-                .eq('tenant_id', tenant_id);
-            if (dError) throw dError;
-        }
+        await leagueDataStore.replaceAll('partidos', tenant_id, []);
 
         let equipoIds = equipos.map(e => e.id);
         
@@ -262,33 +283,30 @@ exports.generateRoundRobin = async (req, res) => {
             equipoIds.splice(1, 0, equipoIds.pop());
         }
 
-        // Inserción multi-fila en BD
-        if (useLocalDevMode) {
-            const canchasDisponibles = localLeagueDataStore
-                .list('canchas', tenant_id)
-                .filter((c) => c && c.activa !== false && String(c.nombre || '').trim())
-                .sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
-            const horariosBase = ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'];
-            const usoPorJornada = {};
+        const canchasDisponibles = (await leagueDataStore.list('canchas', tenant_id))
+            .filter((c) => c && c.activa !== false && String(c.nombre || '').trim())
+            .sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
+        const horariosBase = ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'];
+        const usoPorJornada = {};
 
-            localLeagueDataStore.replaceAll(
-                'partidos',
-                tenant_id,
-                partidos.map((p) => {
-                    const autoProgramacion = (function assignCanchaYHorario() {
-                        if (canchasDisponibles.length === 0) return {};
-                        const jornadaKey = String(p.jornada);
-                        const usados = usoPorJornada[jornadaKey] || 0;
-                        usoPorJornada[jornadaKey] = usados + 1;
-                        const canchaIndex = usados % canchasDisponibles.length;
-                        const bloqueHorario = Math.floor(usados / canchasDisponibles.length);
-                        const horario = horariosBase[bloqueHorario % horariosBase.length];
-                        return {
-                            sede: canchasDisponibles[canchaIndex].nombre,
-                            horario
-                        };
-                    })();
+        await leagueDataStore.replaceAll(
+            'partidos',
+            tenant_id,
+            partidos.map((p) => {
+                const autoProgramacion = (function assignCanchaYHorario() {
+                    if (canchasDisponibles.length === 0) return {};
+                    const jornadaKey = String(p.jornada);
+                    const usados = usoPorJornada[jornadaKey] || 0;
+                    usoPorJornada[jornadaKey] = usados + 1;
+                    const canchaIndex = usados % canchasDisponibles.length;
+                    const bloqueHorario = Math.floor(usados / canchasDisponibles.length);
+                    const horario = horariosBase[bloqueHorario % horariosBase.length];
                     return {
+                        sede: canchasDisponibles[canchaIndex].nombre,
+                        horario
+                    };
+                })();
+                return {
                     ...p,
                     goles_local: 0,
                     goles_visitante: 0,
@@ -296,24 +314,16 @@ exports.generateRoundRobin = async (req, res) => {
                     stats: null,
                     sede: autoProgramacion.sede || null,
                     horario: autoProgramacion.horario || null
-                    };
-                })
-            );
-            return res.json({
-                message: canchasDisponibles.length > 0
-                    ? "Calendario generado con asignación automática de canchas."
-                    : "Calendario generado exitosamente",
-                partidos_generados: partidos.length,
-                canchas_asignadas: canchasDisponibles.length
-            });
-        } else {
-            const { error: iError } = await supabase
-                .from('partido')
-                .insert(partidos);
-            if (iError) throw iError;
-        }
-
-        res.json({ message: "Calendario generado exitosamente", partidos_generados: partidos.length });
+                };
+            })
+        );
+        return res.json({
+            message: canchasDisponibles.length > 0
+                ? "Calendario generado con asignación automática de canchas."
+                : "Calendario generado exitosamente",
+            partidos_generados: partidos.length,
+            canchas_asignadas: canchasDisponibles.length
+        });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -325,43 +335,24 @@ exports.getCalendario = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            const equipos = localLeagueDataStore.list('equipos', tenant_id);
-            const partidos = localLeagueDataStore.list('partidos', tenant_id).sort((a, b) => a.jornada - b.jornada);
-            const byId = new Map(equipos.map((e) => [e.id, e]));
-            const result = partidos.map((p) => ({
-                ...p,
-                local_nombre: byId.get(p.equipo_local_id)?.nombre || 'Local',
-                local_escudo: byId.get(p.equipo_local_id)?.escudo || '',
-                visitante_nombre: byId.get(p.equipo_visitante_id)?.nombre || 'Visitante',
-                visitante_escudo: byId.get(p.equipo_visitante_id)?.escudo || ''
-            }));
-            return res.json(result);
-        }
-
-        // En Supabase, para joins usamos la sintaxis select con relaciones
-        const { data, error } = await supabase
-            .from('partido')
-            .select(`
-                id, jornada, goles_local, goles_visitante, estatus, stats, sede, horario,
-                local:equipo_local_id (nombre, escudo),
-                visitante:equipo_visitante_id (nombre, escudo)
-            `)
-            .eq('tenant_id', tenant_id)
-            .order('jornada', { ascending: true });
-
-        if (error) throw error;
-
-        // Mapear para mantener el formato que espera el frontend
-        const result = data.map(p => ({
+        const equipos = await leagueDataStore.list('equipos', tenant_id);
+        const partidos = (await leagueDataStore.list('partidos', tenant_id)).sort((a, b) => a.jornada - b.jornada);
+        const byId = new Map(equipos.map((e) => [e.id, e]));
+        const arbById = new Map((await leagueDataStore.list('arbitros', tenant_id)).map((a) => [a.id, a]));
+        const result = partidos.map((p) => ({
             ...p,
-            local_nombre: p.local.nombre,
-            local_escudo: p.local.escudo,
-            visitante_nombre: p.visitante.nombre,
-            visitante_escudo: p.visitante.escudo
+            local_nombre: p.equipo_local_id
+                ? (byId.get(p.equipo_local_id)?.nombre || 'Local')
+                : (p.fase ? 'Por definir' : 'Local'),
+            local_escudo: p.equipo_local_id ? (byId.get(p.equipo_local_id)?.escudo || '') : '',
+            visitante_nombre: p.equipo_visitante_id
+                ? (byId.get(p.equipo_visitante_id)?.nombre || 'Visitante')
+                : (p.fase ? 'Por definir' : 'Visitante'),
+            visitante_escudo: p.equipo_visitante_id ? (byId.get(p.equipo_visitante_id)?.escudo || '') : '',
+            arbitro_id: p.arbitro_id || null,
+            arbitro_nombre: arbById.get(p.arbitro_id)?.nombre || ''
         }));
-
-        res.json(result);
+        return res.json(result);
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }
@@ -375,98 +366,39 @@ exports.updatePartido = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            const partidoLocal = localLeagueDataStore.getById('partidos', id, tenant_id);
-            if (!partidoLocal) return res.status(404).json({ error: "Partido no encontrado" });
-            localLeagueDataStore.update('partidos', id, tenant_id, {
-                goles_local,
-                goles_visitante,
-                estatus: 'Finalizado',
-                stats
-            });
-            return res.json({ message: "Marcador y estadísticas cargadas oficialmente." });
-        }
+        const partido = await leagueDataStore.getById('partidos', id, tenant_id);
+        if (!partido) return res.status(404).json({ error: "Partido no encontrado" });
 
-        const { data: partido, error: pError } = await supabase
-            .from('partido')
-            .select('*')
-            .eq('id', id)
-            .eq('tenant_id', tenant_id)
-            .single();
-
-        if (pError || !partido) return res.status(404).json({ error: "Partido no encontrado" });
-        
         if (partido.estatus === 'Finalizado') {
-            await supabase
-                .from('partido')
-                .update({ stats })
-                .eq('id', id);
+            await leagueDataStore.update('partidos', id, tenant_id, { stats });
             return res.json({ message: "Acta estadística editada exitosamente." });
         }
-        
-        const { error: uError } = await supabase
-            .from('partido')
-            .update({ 
-                goles_local, 
-                goles_visitante, 
-                estatus: 'Finalizado', 
-                stats 
-            })
-            .eq('id', id);
 
-        if (uError) throw uError;
-        
-        let ptsLocal = 0, ptsVis = 0, pG_local = 0, pG_vis = 0, pE_local = 0, pE_vis = 0, pP_local = 0, pP_vis = 0;
-        
-        if (goles_local > goles_visitante) { ptsLocal = 3; pG_local = 1; pP_vis = 1; }
-        else if (goles_visitante > goles_local) { ptsVis = 3; pG_vis = 1; pP_local = 1; }
-        else { ptsLocal = 1; ptsVis = 1; pE_local = 1; pE_vis = 1; }
-        
-        // Actualización de equipos con lógica de incremento
-        // Nota: RPC o actualizaciones individuales son necesarias para incrementos atómicos en Supabase
-        // Aquí usaremos una combinación
-        
-        const updateEquipo = async (equipoId, g, e, p, gf, gc, pts) => {
-            const { data: eq } = await supabase.from('equipo').select('*').eq('id', equipoId).single();
-            await supabase.from('equipo').update({
-                partidos_jugados: eq.partidos_jugados + 1,
-                partidos_ganados: eq.partidos_ganados + g,
-                partidos_empatados: eq.partidos_empatados + e,
-                partidos_perdidos: eq.partidos_perdidos + p,
-                goles_favor: eq.goles_favor + gf,
-                goles_contra: eq.goles_contra + gc,
-                puntos: eq.puntos + pts
-            }).eq('id', equipoId);
-        };
+        await leagueDataStore.update('partidos', id, tenant_id, {
+            goles_local,
+            goles_visitante,
+            estatus: 'Finalizado',
+            stats
+        });
 
-        await updateEquipo(partido.equipo_local_id, pG_local, pE_local, pP_local, goles_local, goles_visitante, ptsLocal);
-        await updateEquipo(partido.equipo_visitante_id, pG_vis, pE_vis, pP_vis, goles_visitante, goles_local, ptsVis);
+        if (!useLocalDevMode) {
+            await applyStandingsAfterMatch({ ...partido, tenant_id }, goles_local, goles_visitante);
+        }
 
-        res.json({ message: "Marcador y estadísticas cargadas oficialmente." });
+        return res.json({ message: "Marcador y estadísticas cargadas oficialmente." });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
 exports.updateProgramacion = async (req, res) => {
     const { slug, id } = req.params;
-    const { sede, horario } = req.body;
+    const { sede, horario, arbitro_id } = req.body;
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            const updated = localLeagueDataStore.update('partidos', id, tenant_id, { sede: sede || null, horario: horario || null });
-            if (!updated) return res.status(404).json({ error: "Partido no encontrado" });
-            return res.json({ message: "Programación actualizada exitosamente." });
-        }
-
-        const { error } = await supabase
-            .from('partido')
-            .update({ sede: sede || null, horario: horario || null })
-            .eq('id', id)
-            .eq('tenant_id', tenant_id);
-
-        if (error) throw error;
-        res.json({ message: "Programación actualizada exitosamente." });
+        const updated = await leagueDataStore.update('partidos', id, tenant_id, { sede: sede || null, horario: horario || null, arbitro_id: arbitro_id || null });
+        if (!updated) return res.status(404).json({ error: "Partido no encontrado" });
+        return res.json({ message: "Programación actualizada exitosamente." });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -476,19 +408,8 @@ exports.getArbitros = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            const data = localLeagueDataStore.list('arbitros', tenant_id).sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
-            return res.json(data);
-        }
-
-        const { data, error } = await supabase
-            .from('arbitro')
-            .select('*')
-            .eq('tenant_id', tenant_id)
-            .order('nombre', { ascending: true });
-
-        if (error) throw error;
-        res.json(data);
+        const data = (await leagueDataStore.list('arbitros', tenant_id)).sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
+        return res.json(data);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -500,34 +421,15 @@ exports.addArbitro = async (req, res) => {
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         const id = uuidv4();
 
-        if (useLocalDevMode) {
-            const created = localLeagueDataStore.insert('arbitros', {
+        const created = await leagueDataStore.insert('arbitros', {
                 id,
                 tenant_id,
                 nombre,
                 rol: rol || 'Central',
                 matricula: matricula || '',
-                categoria: categoria || 'General',
-                disponibilidad: true
+                categoria: categoria || 'General'
             });
             return res.json(created);
-        }
-
-        const { data, error } = await supabase
-            .from('arbitro')
-            .insert([{ 
-                id, 
-                tenant_id, 
-                nombre, 
-                rol: rol || 'Central', 
-                matricula: matricula || '', 
-                categoria: categoria || 'General', 
-                disponibilidad: true 
-            }])
-            .select();
-
-        if (error) throw error;
-        res.json(data[0]);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -538,20 +440,9 @@ exports.updateArbitro = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         
-        if (useLocalDevMode) {
-            const updated = localLeagueDataStore.update('arbitros', id, tenant_id, { nombre, rol, matricula, categoria });
-            if (!updated) return res.status(404).json({ error: "Árbitro no encontrado" });
-            return res.json({ message: "Árbitro actualizado exitosamente" });
-        }
-
-        const { error } = await supabase
-            .from('arbitro')
-            .update({ nombre, rol, matricula, categoria })
-            .eq('id', id)
-            .eq('tenant_id', tenant_id);
-
-        if (error) throw error;
-        res.json({ message: "Árbitro actualizado exitosamente" });
+        const updated = await leagueDataStore.update('arbitros', id, tenant_id, { nombre, rol, matricula, categoria });
+        if (!updated) return res.status(404).json({ error: "Árbitro no encontrado" });
+        return res.json({ message: "Árbitro actualizado exitosamente" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -561,20 +452,9 @@ exports.deleteArbitro = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
         
-        if (useLocalDevMode) {
-            const deleted = localLeagueDataStore.remove('arbitros', id, tenant_id);
-            if (!deleted) return res.status(404).json({ error: "Árbitro no encontrado" });
-            return res.json({ message: "Registro eliminado" });
-        }
-
-        const { error } = await supabase
-            .from('arbitro')
-            .delete()
-            .eq('id', id)
-            .eq('tenant_id', tenant_id);
-
-        if (error) throw error;
-        res.json({ message: "Registro eliminado" });
+        const deleted = await leagueDataStore.remove('arbitros', id, tenant_id);
+        if (!deleted) return res.status(404).json({ error: "Árbitro no encontrado" });
+        return res.json({ message: "Registro eliminado" });
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -583,13 +463,7 @@ exports.getCanchas = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: "Gestión de canchas disponible en modo local por ahora." });
-        }
-
-        const data = localLeagueDataStore
-            .list('canchas', tenant_id)
+        const data = (await leagueDataStore.list('canchas', tenant_id))
             .sort((a, b) => String(a.nombre).localeCompare(String(b.nombre)));
         return res.json(data);
     } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -601,21 +475,15 @@ exports.addCancha = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: "Gestión de canchas disponible en modo local por ahora." });
-        }
-
         const nombreTrim = String(nombre || '').trim();
         if (!nombreTrim) return res.status(400).json({ error: "El nombre de la cancha es obligatorio." });
 
-        const existing = localLeagueDataStore
-            .list('canchas', tenant_id)
+        const existing = (await leagueDataStore.list('canchas', tenant_id))
             .find((c) => String(c.nombre || '').toLowerCase() === nombreTrim.toLowerCase());
         if (existing) return res.status(409).json({ error: "Ya existe una cancha con ese nombre." });
 
         const capacidadNum = Number(capacidad);
-        const created = localLeagueDataStore.insert('canchas', {
+        const created = await leagueDataStore.insert('canchas', {
             id: uuidv4(),
             tenant_id,
             nombre: nombreTrim,
@@ -636,12 +504,7 @@ exports.deleteCancha = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: "Gestión de canchas disponible en modo local por ahora." });
-        }
-
-        const deleted = localLeagueDataStore.remove('canchas', id, tenant_id);
+        const deleted = await leagueDataStore.remove('canchas', id, tenant_id);
         if (!deleted) return res.status(404).json({ error: "Cancha no encontrada." });
         return res.json({ message: "Cancha eliminada." });
     } catch (err) { return res.status(500).json({ error: err.message }); }
@@ -653,17 +516,7 @@ exports.getTorneos = async (req, res) => {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: "Liga no encontrada" });
 
-        if (useLocalDevMode) {
-            return res.json(localLeagueDataStore.list('torneos', tenant_id));
-        }
-
-        const { data, error } = await supabase
-            .from('torneo')
-            .select('*')
-            .eq('tenant_id', tenant_id);
-
-        if (error) throw error;
-        res.json(data);
+        return res.json(await leagueDataStore.list('torneos', tenant_id));
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -682,8 +535,7 @@ exports.addTorneo = async (req, res) => {
         }
         const id = uuidv4();
 
-        if (useLocalDevMode) {
-            const created = localLeagueDataStore.insert('torneos', {
+        const created = await leagueDataStore.insert('torneos', {
                 id,
                 tenant_id,
                 nombre,
@@ -696,26 +548,6 @@ exports.addTorneo = async (req, res) => {
                 cobros: defaultCobrosTorneo
             });
             return res.json(created);
-        }
-
-        const { data, error } = await supabase
-            .from('torneo')
-            .insert([{ 
-                id, 
-                tenant_id, 
-                nombre, 
-                categoria: categoriaNormalizada,
-                formato: formato || 'Liga (Todos contra todos)', 
-                fecha_inicio: fecha_inicio || null, 
-                fecha_fin: fecha_fin || null, 
-                estatus: estatus || 'En Registro', 
-                premio: premio || '',
-                cobros: defaultCobrosTorneo
-            }])
-            .select();
-
-        if (error) throw error;
-        res.json(data[0]);
     } catch (err) { res.status(500).json({ error: err.message }); }
 };
 
@@ -724,19 +556,13 @@ exports.getTournamentEnrollments = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Consulta de inscripciones disponible en modo local por ahora.' });
-        }
-
-        const torneo = localLeagueDataStore.getById('torneos', torneoId, tenant_id);
+        const torneo = await leagueDataStore.getById('torneos', torneoId, tenant_id);
         if (!torneo) return res.status(404).json({ error: 'Torneo no encontrado' });
 
-        const representatives = localLeagueDataStore.list('representantes', tenant_id);
+        const representatives = await leagueDataStore.list('representantes', tenant_id);
         const byRep = new Map(representatives.map((r) => [r.id, r]));
 
-        const inscripciones = localLeagueDataStore
-            .list('inscripciones', tenant_id)
+        const inscripciones = (await leagueDataStore.list('inscripciones', tenant_id))
             .filter((i) => i.torneo_id === torneoId)
             .map((i) => ({
                 ...i,
@@ -757,16 +583,11 @@ exports.getTournamentEnrollments = async (req, res) => {
 
 exports.updateTorneoEnrollmentConfig = async (req, res) => {
     const { slug, id } = req.params;
-    const { mantenimiento_cancha, arbitraje, inscripcion_equipo, costo_por_jugador } = req.body;
+    const { costo_total } = req.body;
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Configuración de cobros disponible en modo local por ahora.' });
-        }
-
-        const torneo = localLeagueDataStore.getById('torneos', id, tenant_id);
+        const torneo = await leagueDataStore.getById('torneos', id, tenant_id);
         if (!torneo) return res.status(404).json({ error: 'Torneo no encontrado' });
 
         const toMoney = (v) => {
@@ -775,13 +596,10 @@ exports.updateTorneoEnrollmentConfig = async (req, res) => {
         };
 
         const cobros = {
-            mantenimiento_cancha: toMoney(mantenimiento_cancha),
-            arbitraje: toMoney(arbitraje),
-            inscripcion_equipo: toMoney(inscripcion_equipo),
-            costo_por_jugador: toMoney(costo_por_jugador)
+            costo_total: toMoney(costo_total)
         };
 
-        const updated = localLeagueDataStore.update('torneos', id, tenant_id, { cobros });
+        const updated = await leagueDataStore.update('torneos', id, tenant_id, { cobros });
         return res.json({ message: 'Cobros de inscripción actualizados', torneo: updated });
     } catch (err) {
         return res.status(500).json({ error: err.message });
@@ -793,12 +611,7 @@ exports.getPublicEnrollmentInfo = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Inscripción pública disponible en modo local por ahora.' });
-        }
-
-        const torneo = localLeagueDataStore.getById('torneos', torneoId, tenant_id);
+        const torneo = await leagueDataStore.getById('torneos', torneoId, tenant_id);
         if (!torneo) return res.status(404).json({ error: 'Torneo no encontrado' });
 
         return res.json({
@@ -807,7 +620,7 @@ exports.getPublicEnrollmentInfo = async (req, res) => {
                 nombre: torneo.nombre,
                 categoria: torneo.categoria,
                 estatus: torneo.estatus,
-                cobros: { ...defaultCobrosTorneo, ...(torneo.cobros || {}) }
+                cobros: normalizeCobros(torneo.cobros)
             }
         });
     } catch (err) {
@@ -821,12 +634,7 @@ exports.registerRepresentativeInTournament = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Inscripción pública disponible en modo local por ahora.' });
-        }
-
-        if (!nombre_representante || !email || !password || !nombre_equipo) {
+if (!nombre_representante || !email || !password || !nombre_equipo) {
             return res.status(400).json({ error: 'Faltan datos obligatorios del representante/equipo.' });
         }
         if (!validatePasswordPolicy(password)) {
@@ -862,7 +670,7 @@ exports.registerRepresentativeInTournament = async (req, res) => {
             return res.status(400).json({ error: 'CVV inválido.' });
         }
 
-        const torneo = localLeagueDataStore.getById('torneos', torneoId, tenant_id);
+        const torneo = await leagueDataStore.getById('torneos', torneoId, tenant_id);
         if (!torneo) return res.status(404).json({ error: 'Torneo no encontrado' });
 
         const estatusTorneo = String(torneo.estatus || '').toLowerCase();
@@ -871,10 +679,10 @@ exports.registerRepresentativeInTournament = async (req, res) => {
         }
 
         const emailNorm = String(email).toLowerCase().trim();
-        const representatives = localLeagueDataStore.list('representantes', tenant_id);
+        const representatives = await leagueDataStore.list('representantes', tenant_id);
         let representative = representatives.find((r) => String(r.email).toLowerCase() === emailNorm);
         if (!representative) {
-            representative = localLeagueDataStore.insert('representantes', {
+            representative = await leagueDataStore.insert('representantes', {
                 id: uuidv4(),
                 tenant_id,
                 nombre_representante: String(nombre_representante).trim(),
@@ -888,8 +696,7 @@ exports.registerRepresentativeInTournament = async (req, res) => {
             if (!valid) return res.status(401).json({ error: 'Contraseña incorrecta para ese representante.' });
         }
 
-        const yaInscrito = localLeagueDataStore
-            .list('inscripciones', tenant_id)
+        const yaInscrito = (await leagueDataStore.list('inscripciones', tenant_id))
             .find((i) => i.torneo_id === torneoId && i.representante_id === representative.id);
         if (yaInscrito) {
             return res.status(409).json({ error: 'El representante ya está inscrito en este torneo.' });
@@ -920,9 +727,6 @@ exports.registerRepresentativeInTournament = async (req, res) => {
         if (jugadoresList.some((j) => !j.apellido_paterno || !j.apellido_materno)) {
             return res.status(400).json({ error: 'Todos los jugadores deben incluir apellido paterno y materno.' });
         }
-        if (jugadoresList.some((j) => !j.foto_jugador)) {
-            return res.status(400).json({ error: 'Todos los jugadores deben incluir foto.' });
-        }
         if (jugadoresList.some((j) => !isValidCurp(j.curp))) {
             return res.status(400).json({ error: 'Alguna CURP de jugador no es válida.' });
         }
@@ -942,14 +746,10 @@ exports.registerRepresentativeInTournament = async (req, res) => {
             return res.status(400).json({ error: 'Debes indicar color de playera, short y medias.' });
         }
 
-        const cobros = { ...defaultCobrosTorneo, ...(torneo.cobros || {}) };
-        const costoJornada = Number(cobros.mantenimiento_cancha || 0) +
-            Number(cobros.arbitraje || 0) +
-            Number(cobros.inscripcion_equipo || 0) +
-            Number(cobros.costo_por_jugador || 0);
-        const total = Number(costoJornada.toFixed(2));
+        const cobros = normalizeCobros(torneo.cobros);
+        const total = Number((Number(cobros.costo_total || 0)).toFixed(2));
 
-        const inscripcion = localLeagueDataStore.insert('inscripciones', {
+        const inscripcion = await leagueDataStore.insert('inscripciones', {
             id: uuidv4(),
             tenant_id,
             torneo_id: torneoId,
@@ -962,11 +762,7 @@ exports.registerRepresentativeInTournament = async (req, res) => {
             },
             jugadores: jugadoresList,
             desglose_cobro: {
-                mantenimiento_cancha: Number(cobros.mantenimiento_cancha || 0),
-                arbitraje: Number(cobros.arbitraje || 0),
-                inscripcion_equipo: Number(cobros.inscripcion_equipo || 0),
-                costo_por_jugador: Number(cobros.costo_por_jugador || 0),
-                costo_jornada: Number(costoJornada.toFixed(2)),
+                costo_total: total,
                 total_jugadores: jugadoresList.length
             },
             total_cobro: total,
@@ -1001,14 +797,8 @@ exports.loginRepresentative = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Login de representante disponible en modo local por ahora.' });
-        }
-
         const emailNorm = String(email || '').toLowerCase().trim();
-        const representative = localLeagueDataStore
-            .list('representantes', tenant_id)
+        const representative = (await leagueDataStore.list('representantes', tenant_id))
             .find((r) => String(r.email).toLowerCase() === emailNorm);
         if (!representative) return res.status(404).json({ error: 'Representante no encontrado' });
 
@@ -1039,10 +829,6 @@ exports.getRepresentativeDashboard = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Dashboard de representante disponible en modo local por ahora.' });
-        }
-
         const authHeader = req.headers.authorization || '';
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
         if (!token) return res.status(401).json({ error: 'Token de representante requerido.' });
@@ -1058,14 +844,13 @@ exports.getRepresentativeDashboard = async (req, res) => {
             return res.status(403).json({ error: 'No autorizado para esta liga.' });
         }
 
-        const representatives = localLeagueDataStore.list('representantes', tenant_id);
+        const representatives = await leagueDataStore.list('representantes', tenant_id);
         const representative = representatives.find((r) => r.id === decoded.representativeId);
         if (!representative) return res.status(404).json({ error: 'Representante no encontrado.' });
 
-        const torneos = localLeagueDataStore.list('torneos', tenant_id);
+        const torneos = await leagueDataStore.list('torneos', tenant_id);
         const byTorneo = new Map(torneos.map((t) => [t.id, t]));
-        const inscripciones = localLeagueDataStore
-            .list('inscripciones', tenant_id)
+        const inscripciones = (await leagueDataStore.list('inscripciones', tenant_id))
             .filter((i) => i.representante_id === representative.id)
             .map((i) => ({
                 ...i,
@@ -1099,10 +884,6 @@ exports.addPlayersToEnrollment = async (req, res) => {
     try {
         const tenant_id = await getTenantIdBySlug(slug);
         if (!tenant_id) return res.status(404).json({ error: 'Liga no encontrada' });
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Función disponible en modo local por ahora.' });
-        }
-
         const authHeader = req.headers.authorization || '';
         const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
         if (!token) return res.status(401).json({ error: 'Token de representante requerido.' });
@@ -1118,13 +899,13 @@ exports.addPlayersToEnrollment = async (req, res) => {
             return res.status(403).json({ error: 'No autorizado para esta liga.' });
         }
 
-        const inscripcion = localLeagueDataStore.getById('inscripciones', inscripcionId, tenant_id);
+        const inscripcion = await leagueDataStore.getById('inscripciones', inscripcionId, tenant_id);
         if (!inscripcion) return res.status(404).json({ error: 'Inscripción no encontrada.' });
         if (inscripcion.representante_id !== decoded.representativeId) {
             return res.status(403).json({ error: 'No autorizado para esta inscripción.' });
         }
 
-        const torneo = localLeagueDataStore.getById('torneos', inscripcion.torneo_id, tenant_id);
+        const torneo = await leagueDataStore.getById('torneos', inscripcion.torneo_id, tenant_id);
         const estatusTorneo = String(torneo?.estatus || '').toLowerCase();
         if (estatusTorneo === 'finalizado' || estatusTorneo === 'pausado') {
             return res.status(400).json({ error: 'Este torneo no acepta cambios en las inscripciones.' });
@@ -1153,9 +934,6 @@ exports.addPlayersToEnrollment = async (req, res) => {
         if (nuevosJugadores.some((j) => !j.apellido_paterno || !j.apellido_materno)) {
             return res.status(400).json({ error: 'Todos los jugadores deben incluir apellido paterno y materno.' });
         }
-        if (nuevosJugadores.some((j) => !j.foto_jugador)) {
-            return res.status(400).json({ error: 'Todos los jugadores deben incluir foto.' });
-        }
         if (nuevosJugadores.some((j) => !isValidCurp(j.curp))) {
             return res.status(400).json({ error: 'Alguna CURP de jugador no es válida.' });
         }
@@ -1177,7 +955,7 @@ exports.addPlayersToEnrollment = async (req, res) => {
         if (subcapitanes > 1) return res.status(400).json({ error: 'Solo se permite un subcapitán por equipo.' });
 
         const desglose = { ...(inscripcion.desglose_cobro || {}), total_jugadores: jugadoresFinal.length };
-        const updated = localLeagueDataStore.update('inscripciones', inscripcionId, tenant_id, {
+        const updated = await leagueDataStore.update('inscripciones', inscripcionId, tenant_id, {
             jugadores: jugadoresFinal,
             desglose_cobro: desglose
         });
@@ -1191,7 +969,7 @@ exports.addPlayersToEnrollment = async (req, res) => {
     }
 };
 
-const decodeArbitroToken = (req) => {
+        const decodeArbitroToken = (req) => {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     if (!token) return { error: { status: 401, message: 'Token de árbitro requerido.' } };
@@ -1208,11 +986,10 @@ const decodeArbitroToken = (req) => {
 // Devuelve todas las ligas donde la matrícula está registrada
 const findArbitroLigas = async (matricula) => {
     const matriculaNorm = String(matricula || '').trim().toLowerCase();
-    const tenants = await localTenantStore.listTenants();
+    const tenants = await listAllTenants();
     const ligas = [];
     for (const tenant of tenants) {
-        const arbitro = localLeagueDataStore
-            .list('arbitros', tenant.id)
+        const arbitro = (await leagueDataStore.list('arbitros', tenant.id))
             .find((a) => String(a.matricula || '').trim().toLowerCase() === matriculaNorm);
         if (arbitro) {
             ligas.push({ slug: tenant.subdominio_o_slug, nombre: tenant.nombre_liga, tenantId: tenant.id, arbitro });
@@ -1225,11 +1002,10 @@ const findArbitroLigas = async (matricula) => {
 const resolveArbitroContext = async (decoded, slug) => {
     const slugNorm = String(slug || '').trim();
     if (!slugNorm) return { error: { status: 400, message: 'Debes seleccionar una liga.' } };
-    const tenant = await localTenantStore.getTenantBySlug(slugNorm);
+    const tenant = await getTenantBySlugFull(slugNorm);
     if (!tenant) return { error: { status: 404, message: 'Liga no encontrada.' } };
     const matriculaNorm = String(decoded.matricula || '').trim().toLowerCase();
-    const arbitro = localLeagueDataStore
-        .list('arbitros', tenant.id)
+    const arbitro = (await leagueDataStore.list('arbitros', tenant.id))
         .find((a) => String(a.matricula || '').trim().toLowerCase() === matriculaNorm);
     if (!arbitro) return { error: { status: 403, message: 'No perteneces al padrón de árbitros de esta liga.' } };
     return { tenant, arbitro };
@@ -1238,10 +1014,7 @@ const resolveArbitroContext = async (decoded, slug) => {
 exports.loginArbitro = async (req, res) => {
     const { matricula } = req.body;
     try {
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Login de árbitro disponible en modo local por ahora.' });
-        }
-        if (!process.env.JWT_SECRET) return res.status(500).json({ error: 'Configuración JWT incompleta.' });
+if (!process.env.JWT_SECRET) return res.status(500).json({ error: 'Configuración JWT incompleta.' });
 
         const matriculaNorm = String(matricula || '').trim();
         if (!matriculaNorm) return res.status(400).json({ error: 'Ingresa tu matrícula.' });
@@ -1267,9 +1040,6 @@ exports.loginArbitro = async (req, res) => {
 
 exports.getArbitroDashboard = async (req, res) => {
     try {
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Dashboard de árbitro disponible en modo local por ahora.' });
-        }
         const { decoded, error } = decodeArbitroToken(req);
         if (error) return res.status(error.status).json({ error: error.message });
 
@@ -1281,14 +1051,13 @@ exports.getArbitroDashboard = async (req, res) => {
         if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.message });
         const { tenant, arbitro } = ctx;
         const tenant_id = tenant.id;
-        const equipos = localLeagueDataStore.list('equipos', tenant_id);
+        const equipos = await leagueDataStore.list('equipos', tenant_id);
         const byId = new Map(equipos.map((e) => [e.id, e]));
         const excludedTeamId = arbitro.equipo_id || null;
 
-        const partidos = localLeagueDataStore
-            .list('partidos', tenant_id)
+        const partidos = (await leagueDataStore.list('partidos', tenant_id))
             .sort((a, b) => a.jornada - b.jornada)
-            .filter((p) => !excludedTeamId || (p.equipo_local_id !== excludedTeamId && p.equipo_visitante_id !== excludedTeamId))
+            .filter((p) => p.arbitro_id === arbitro.id)
             .map((p) => ({
                 id: p.id,
                 jornada: p.jornada,
@@ -1304,8 +1073,42 @@ exports.getArbitroDashboard = async (req, res) => {
                 visitante_escudo: byId.get(p.equipo_visitante_id)?.escudo || ''
             }));
 
+        // Tabla general: estadísticas de TODOS los equipos con TODOS los partidos de la liga
+        const num = (v) => Number(v || 0);
+        const statsMap = {};
+        const ensureTeam = (nombre, escudo) => {
+            if (!nombre) return null;
+            if (!statsMap[nombre]) statsMap[nombre] = { nombre, escudo: escudo || '', pj: 0, gf: 0, gc: 0, faltas: 0, amarillas: 0, rojas: 0, corners: 0 };
+            if (escudo && !statsMap[nombre].escudo) statsMap[nombre].escudo = escudo;
+            return statsMap[nombre];
+        };
+        const allPartidos = await leagueDataStore.list('partidos', tenant_id);
+        for (const p of allPartidos) {
+            const st = p.stats || {};
+            const faltas = st.faltas || { local: 0, vis: 0 };
+            const amarillas = st.amarillas || { local: 0, vis: 0 };
+            const rojas = st.rojas || { local: 0, vis: 0 };
+            const corners = st.corners || { local: 0, vis: 0 };
+            const finalizado = p.estatus === 'Finalizado';
+            const local = ensureTeam(byId.get(p.equipo_local_id)?.nombre, byId.get(p.equipo_local_id)?.escudo);
+            const visit = ensureTeam(byId.get(p.equipo_visitante_id)?.nombre, byId.get(p.equipo_visitante_id)?.escudo);
+            if (local) {
+                local.gf += num(p.goles_local); local.gc += num(p.goles_visitante);
+                local.faltas += num(faltas.local); local.amarillas += num(amarillas.local); local.rojas += num(rojas.local);
+                local.corners += num(corners.local);
+                if (finalizado) local.pj++;
+            }
+            if (visit) {
+                visit.gf += num(p.goles_visitante); visit.gc += num(p.goles_local);
+                visit.faltas += num(faltas.vis); visit.amarillas += num(amarillas.vis); visit.rojas += num(rojas.vis);
+                visit.corners += num(corners.vis);
+                if (finalizado) visit.pj++;
+            }
+        }
+        const tablaGeneral = Object.values(statsMap).sort((a, b) => (b.gf - b.gc) - (a.gf - a.gc) || b.gf - a.gf);
+
         // Jugadores por equipo (desde inscripciones) para poder multar jugadores
-        const inscripciones = localLeagueDataStore.list('inscripciones', tenant_id);
+        const inscripciones = await leagueDataStore.list('inscripciones', tenant_id);
         const jugadoresPorEquipo = {};
         inscripciones.forEach((ins) => {
             const nombreEquipo = String(ins.nombre_equipo || '').trim();
@@ -1318,8 +1121,7 @@ exports.getArbitroDashboard = async (req, res) => {
         const nombresEquipos = new Set(equipos.map((e) => e.nombre).filter(Boolean));
         Object.keys(jugadoresPorEquipo).forEach((n) => nombresEquipos.add(n));
 
-        const multas = localLeagueDataStore
-            .list('multas', tenant_id)
+        const multas = (await leagueDataStore.list('multas', tenant_id))
             .sort((a, b) => new Date(b.fecha) - new Date(a.fecha));
 
         return res.json({
@@ -1334,6 +1136,7 @@ exports.getArbitroDashboard = async (req, res) => {
             liga: { slug: tenant.subdominio_o_slug, nombre: tenant.nombre_liga || tenant.subdominio_o_slug },
             ligas: ligas.map((l) => ({ slug: l.slug, nombre: l.nombre })),
             partidos,
+            tablaGeneral,
             equipos: [...nombresEquipos].sort((a, b) => a.localeCompare(b)),
             jugadoresPorEquipo,
             multas
@@ -1345,9 +1148,6 @@ exports.getArbitroDashboard = async (req, res) => {
 
 exports.createArbitroMulta = async (req, res) => {
     try {
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Multas disponibles en modo local por ahora.' });
-        }
         const { decoded, error } = decodeArbitroToken(req);
         if (error) return res.status(error.status).json({ error: error.message });
 
@@ -1368,7 +1168,7 @@ exports.createArbitroMulta = async (req, res) => {
         if (!motivo) return res.status(400).json({ error: 'Debes indicar el motivo de la multa.' });
         if (!Number.isFinite(monto) || monto <= 0) return res.status(400).json({ error: 'El monto de la multa debe ser mayor a 0.' });
 
-        const multa = localLeagueDataStore.insert('multas', {
+        const multa = await leagueDataStore.insert('multas', {
             id: uuidv4(),
             tenant_id,
             tipo,
@@ -1391,9 +1191,6 @@ exports.createArbitroMulta = async (req, res) => {
 
 exports.deleteArbitroMulta = async (req, res) => {
     try {
-        if (!useLocalDevMode) {
-            return res.status(501).json({ error: 'Multas disponibles en modo local por ahora.' });
-        }
         const { decoded, error } = decodeArbitroToken(req);
         if (error) return res.status(error.status).json({ error: error.message });
 
@@ -1402,13 +1199,66 @@ exports.deleteArbitroMulta = async (req, res) => {
         const { tenant, arbitro } = ctx;
         const tenant_id = tenant.id;
         const { id } = req.params;
-        const multa = localLeagueDataStore.getById('multas', id, tenant_id);
+        const multa = await leagueDataStore.getById('multas', id, tenant_id);
         if (!multa) return res.status(404).json({ error: 'Multa no encontrada.' });
         if (multa.arbitro_id !== arbitro.id) {
             return res.status(403).json({ error: 'Solo puedes eliminar multas que tú registraste.' });
         }
-        localLeagueDataStore.remove('multas', id, tenant_id);
+        await leagueDataStore.remove('multas', id, tenant_id);
         return res.json({ message: 'Multa eliminada.' });
+    } catch (err) {
+        return res.status(500).json({ error: err.message });
+    }
+};
+
+exports.updateArbitroPartido = async (req, res) => {
+    try {
+        const { decoded, error } = decodeArbitroToken(req);
+        if (error) return res.status(error.status).json({ error: error.message });
+
+        const ctx = await resolveArbitroContext(decoded, req.body.slug);
+        if (ctx.error) return res.status(ctx.error.status).json({ error: ctx.error.message });
+        const { tenant, arbitro } = ctx;
+        const tenant_id = tenant.id;
+        const { id } = req.params;
+
+        const partido = await leagueDataStore.getById('partidos', id, tenant_id);
+        if (!partido) return res.status(404).json({ error: 'Partido no encontrado.' });
+
+        // Un árbitro no puede registrar resultados de partidos de su propio equipo
+        const excludedTeamId = arbitro.equipo_id || null;
+        if (excludedTeamId && (partido.equipo_local_id === excludedTeamId || partido.equipo_visitante_id === excludedTeamId)) {
+            return res.status(403).json({ error: 'No puedes registrar resultados de partidos de tu equipo.' });
+        }
+
+        const toInt = (v) => {
+            const n = Math.trunc(Number(v));
+            return Number.isFinite(n) && n >= 0 ? n : 0;
+        };
+
+        const goles_local = toInt(req.body.goles_local);
+        const goles_visitante = toInt(req.body.goles_visitante);
+
+        const b = req.body || {};
+        // Se preservan otras estadísticas que el organizador pudiera haber cargado
+        const prevStats = partido.stats && typeof partido.stats === 'object' ? partido.stats : {};
+        const stats = {
+            ...prevStats,
+            faltas: { local: toInt(b.faltas_local), vis: toInt(b.faltas_visitante) },
+            amarillas: { local: toInt(b.amarillas_local), vis: toInt(b.amarillas_visitante) },
+            rojas: { local: toInt(b.rojas_local), vis: toInt(b.rojas_visitante) },
+            corners: { local: toInt(b.corners_local), vis: toInt(b.corners_visitante) }
+        };
+
+        const updated = await leagueDataStore.update('partidos', id, tenant_id, {
+            goles_local,
+            goles_visitante,
+            estatus: 'Finalizado',
+            stats
+        });
+        if (!updated) return res.status(404).json({ error: 'Partido no encontrado.' });
+
+        return res.json({ message: 'Resultado y estadísticas registrados correctamente.' });
     } catch (err) {
         return res.status(500).json({ error: err.message });
     }

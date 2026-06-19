@@ -328,10 +328,17 @@ exports.listPublicLigasForPortal = async (req, res) => {
         } else {
             const result = await supabase
                 .from('tenant')
-                .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago')
+                .select('id, nombre_liga, subdominio_o_slug, fecha_vencimiento, estatus_pago, fecha_registro')
                 .order('fecha_registro', { ascending: false });
             if (result.error) throw result.error;
-            data = result.data;
+            const { sortTenants } = require('../db/localTenantStore');
+            data = sortTenants(result.data || []).map((t) => ({
+                id: t.id,
+                nombre_liga: t.nombre_liga,
+                subdominio_o_slug: t.subdominio_o_slug,
+                fecha_vencimiento: t.fecha_vencimiento,
+                estatus_pago: t.estatus_pago
+            }));
         }
 
         const now = new Date();
@@ -776,6 +783,10 @@ exports.deleteTenant = async (req, res) => {
     const { id } = req.params;
     try {
         // Eliminar registros vinculados para evitar errores de integridad (si no hay CASCADE)
+        await supabase.from('multa').delete().eq('tenant_id', id);
+        await supabase.from('inscripcion').delete().eq('tenant_id', id);
+        await supabase.from('representante').delete().eq('tenant_id', id);
+        await supabase.from('cancha').delete().eq('tenant_id', id);
         await supabase.from('partido').delete().eq('tenant_id', id);
         await supabase.from('equipo').delete().eq('tenant_id', id);
         await supabase.from('arbitro').delete().eq('tenant_id', id);

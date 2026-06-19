@@ -3,6 +3,24 @@ const path = require('path');
 
 const STORE_PATH = path.join(__dirname, 'local-tenants.json');
 
+// Ligas demo/seed: siempre primero en listados (portal, dashboard, etc.)
+const PINNED_SLUGS = ['eliminatoria-santa-ana', 'copa-dominguera', 'jocotitlan'];
+
+function tenantSortRank(tenant) {
+  const idx = PINNED_SLUGS.indexOf(tenant.subdominio_o_slug);
+  return idx === -1 ? PINNED_SLUGS.length : idx;
+}
+
+function sortTenants(tenants) {
+  return [...tenants].sort((a, b) => {
+    const rankDiff = tenantSortRank(a) - tenantSortRank(b);
+    if (rankDiff !== 0) return rankDiff;
+    const aa = new Date(a.fecha_registro).getTime();
+    const bb = new Date(b.fecha_registro).getTime();
+    return bb - aa;
+  });
+}
+
 function ensureStore() {
   if (!fs.existsSync(STORE_PATH)) {
     fs.writeFileSync(STORE_PATH, JSON.stringify({ tenants: [] }, null, 2), 'utf8');
@@ -39,11 +57,7 @@ async function insertTenant(tenant) {
 
 async function listTenants() {
   const store = readStore();
-  return [...store.tenants].sort((a, b) => {
-    const aa = new Date(a.fecha_registro).getTime();
-    const bb = new Date(b.fecha_registro).getTime();
-    return bb - aa;
-  });
+  return sortTenants(store.tenants);
 }
 
 async function updateTenant(id, updates) {
@@ -60,5 +74,7 @@ module.exports = {
   getTenantById,
   insertTenant,
   listTenants,
-  updateTenant
+  updateTenant,
+  sortTenants,
+  PINNED_SLUGS
 };
