@@ -32,9 +32,11 @@ const configuredOrigins = String(process.env.FRONTEND_URL || '')
     .map((origin) => origin.trim())
     .filter(Boolean);
 
-const allowedOrigins = configuredOrigins.length
-    ? configuredOrigins
-    : ['http://localhost:5173'];
+const allowedOrigins = [
+    'http://localhost:5173',
+    'https://liga-frontend-delta.vercel.app',
+    ...configuredOrigins
+];
 
 app.use(cors({
     origin: (origin, callback) => {
